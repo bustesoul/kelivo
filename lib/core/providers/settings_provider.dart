@@ -63,6 +63,9 @@ enum MobileMessageNavButtonsMode { always, scroll, never }
 
 enum ImageUploadQuality { original, high, balanced, saver, custom }
 
+/// Outcome of a one-shot provider modelOverrides cleanup migration.
+enum _MigrationResult { noChange, applied, failed }
+
 class SettingsProvider extends ChangeNotifier {
   static const String _providersOrderKey = 'providers_order_v1';
   static const String _providerGroupsKey =
@@ -96,6 +99,19 @@ class SettingsProvider extends ChangeNotifier {
   };
   static const String _themeModeKey = 'theme_mode_v1';
   static const String _providerConfigsKey = 'provider_configs_v1';
+  static const String _removedBuiltInProvidersKey =
+      'removed_builtin_providers_v1';
+  static const String _providerConfigsBackupKey = 'provider_configs_backup_v1';
+  static const String _migrationsVersionKey = 'migrations_version_v1';
+  static const int _embeddingOverridesMigrationVersion = 3;
+  static const Set<String> _embeddingTypeStrings = {'embedding', 'embeddings'};
+  static const Set<String> _embeddingChatOnlyFields = {
+    'abilities',
+    'output',
+    'builtInTools',
+    'built_in_tools',
+    'tools',
+  };
   static const String _pinnedModelsKey = 'pinned_models_v1';
   static const String _selectedModelKey = 'selected_model_v1';
   static const String _perChatModelEnabledKey = 'per_chat_model_enabled_v1';
@@ -448,6 +464,12 @@ class SettingsProvider extends ChangeNotifier {
 
   List<String> _providersOrder = const [];
   List<String> get providersOrder => _providersOrder;
+  final Set<String> _removedBuiltInProviderKeys = <String>{};
+  Set<String> get removedBuiltInProviderKeys =>
+      Set.unmodifiable(_removedBuiltInProviderKeys);
+  bool isBuiltInProviderKey(String key) => _builtInProviderKeys.contains(key);
+  bool isBuiltInProviderRemoved(String key) =>
+      _removedBuiltInProviderKeys.contains(key);
 
   // ===== Provider grouping =====
   List<ProviderGroup> _providerGroups = const <ProviderGroup>[];
@@ -762,11 +784,92 @@ class SettingsProvider extends ChangeNotifier {
   late final Future<void> _loaded;
   Future<void> get loaded => _loaded;
 
+  Future<_MigrationResult> _migrateEmbeddingModelOverrides(
+    dynamic prefs,
+  ) async {
+    Map<String, ProviderConfig>? nextProviderConfigs;
+    int providersChanged = 0;
+    int modelsChanged = 0;
+
+    for (final entry in _providerConfigs.entries) {
+      final providerKey = entry.key;
+      final cfg = entry.value;
+      Map<String, dynamic>? nextOverrides;
+
+      for (final ovEntry in cfg.modelOverrides.entries) {
+        final modelKey = ovEntry.key;
+        final rawOv = ovEntry.value;
+        if (rawOv is! Map) continue;
+
+        final normalizedRawOv = rawOv.map((k, v) => MapEntry(k.toString(), v));
+        final t = (normalizedRawOv['type'] ?? normalizedRawOv['t'] ?? '')
+            .toString()
+            .trim()
+            .toLowerCase();
+        if (!_embeddingTypeStrings.contains(t)) continue;
+
+        final hasChatOnlyKeys = _embeddingChatOnlyFields.any(
+          normalizedRawOv.containsKey,
+        );
+        if (!hasChatOnlyKeys) continue;
+
+        nextOverrides ??= Map<String, dynamic>.from(cfg.modelOverrides);
+        final m = Map<String, dynamic>.from(normalizedRawOv);
+        for (final k in _embeddingChatOnlyFields) {
+          m.remove(k);
+        }
+        nextOverrides[modelKey] = m;
+        modelsChanged++;
+      }
+
+      if (nextOverrides == null) continue;
+      nextProviderConfigs ??= Map<String, ProviderConfig>.from(
+        _providerConfigs,
+      );
+      nextProviderConfigs[providerKey] = cfg.copyWith(
+        modelOverrides: nextOverrides,
+      );
+      providersChanged++;
+    }
+
+    if (nextProviderConfigs == null) return _MigrationResult.noChange;
+    try {
+      final map = nextProviderConfigs.map((k, v) => MapEntry(k, v.toJson()));
+      final encoded = jsonEncode(map);
+      final ok = await prefs.setString(_providerConfigsKey, encoded);
+      if (!ok) return _MigrationResult.failed;
+    } catch (e, st) {
+      assert(() {
+        debugPrint(
+          '[SettingsProvider] provider configs migration persist failed: $e',
+        );
+        debugPrint('$st');
+        return true;
+      }());
+      return _MigrationResult.failed;
+    }
+
+    _providerConfigs = nextProviderConfigs;
+    assert(() {
+      debugPrint(
+        '[SettingsProvider] embedding overrides migration: providers=$providersChanged, models=$modelsChanged',
+      );
+      return true;
+    }());
+    return _MigrationResult.applied;
+  }
+
   Future<void> _load() async {
     final prefs = _preferences;
     await prefs.load();
     final localPreferences = await SharedPreferences.getInstance();
     _providersOrder = prefs.getStringList(_providersOrderKey) ?? [];
+    _removedBuiltInProviderKeys
+      ..clear()
+      ..addAll(
+        (prefs.getStringList(_removedBuiltInProvidersKey) ?? const <String>[])
+            .where(_builtInProviderKeys.contains),
+      );
     final m = prefs.getString(_themeModeKey);
     switch (m) {
       case 'light':
@@ -781,6 +884,7 @@ class SettingsProvider extends ChangeNotifier {
     _themePaletteId = prefs.getString(_themePaletteKey) ?? 'default';
     _useDynamicColor = prefs.getBool(_useDynamicColorKey) ?? true;
     _loadCustomThemes(prefs);
+    var providerConfigsLoaded = false;
     final cfgStr = prefs.getString(_providerConfigsKey);
     if (cfgStr != null && cfgStr.isNotEmpty) {
       try {
@@ -789,6 +893,8 @@ class SettingsProvider extends ChangeNotifier {
           (k, v) =>
               MapEntry(k, ProviderConfig.fromJson(v as Map<String, dynamic>)),
         );
+        _removedBuiltInProviderKeys.removeWhere(_providerConfigs.containsKey);
+        providerConfigsLoaded = true;
       } catch (e, st) {
         assert(() {
           debugPrint('[SettingsProvider] providerConfigs decode failed: $e');
@@ -796,6 +902,83 @@ class SettingsProvider extends ChangeNotifier {
           return true;
         }());
       }
+    }
+
+    // Cleanup legacy embedding overrides persisted before type-switch safeguards.
+    try {
+      final migrationVersion = prefs.getInt(_migrationsVersionKey) ?? 0;
+      if (providerConfigsLoaded &&
+          migrationVersion < _embeddingOverridesMigrationVersion) {
+        try {
+          FlutterLogger.log(
+            '[SettingsProvider] provider modelOverrides migration start',
+            tag: 'Migration',
+          );
+        } catch (_) {}
+
+        var backupOk = true;
+        if (!prefs.containsKey(_providerConfigsBackupKey)) {
+          final backup = _providerConfigs.map(
+            (k, v) => MapEntry(k, v.toJson()),
+          );
+          backupOk = await prefs.setString(
+            _providerConfigsBackupKey,
+            jsonEncode(backup),
+          );
+          assert(() {
+            debugPrint(
+              '[SettingsProvider] provider configs backup saved before migration.',
+            );
+            return true;
+          }());
+          if (!backupOk) {
+            assert(() {
+              debugPrint(
+                '[SettingsProvider] provider configs backup failed; abort migration.',
+              );
+              return true;
+            }());
+          }
+        }
+
+        if (backupOk) {
+          final result = await _migrateEmbeddingModelOverrides(prefs);
+          if (result != _MigrationResult.failed) {
+            await prefs.setInt(
+              _migrationsVersionKey,
+              _embeddingOverridesMigrationVersion,
+            );
+          }
+          assert(() {
+            if (result == _MigrationResult.applied) {
+              debugPrint(
+                '[SettingsProvider] provider modelOverrides migration applied.',
+              );
+            }
+            return true;
+          }());
+          try {
+            FlutterLogger.log(
+              '[SettingsProvider] provider modelOverrides migration done (result=$result)',
+              tag: 'Migration',
+            );
+          } catch (_) {}
+        }
+      }
+    } catch (e, st) {
+      try {
+        FlutterLogger.log(
+          '[SettingsProvider] provider modelOverrides migration failed: $e\n$st',
+          tag: 'Migration',
+        );
+      } catch (_) {}
+      assert(() {
+        debugPrint(
+          '[SettingsProvider] provider modelOverrides migration failed: $e',
+        );
+        debugPrint('$st');
+        return true;
+      }());
     }
 
     // load provider grouping
@@ -1546,19 +1729,6 @@ class SettingsProvider extends ChangeNotifier {
         );
       } catch (_) {}
     }
-    if (_providerConfigs.isEmpty) {
-      // Seed a couple of sensible defaults on first launch, but do not recreate
-      // providers implicitly during later reads (e.g., when switching chats).
-      ensureProviderConfig('KelivoIN', defaultName: 'KelivoIN');
-      ensureProviderConfig('Tensdaq', defaultName: 'Tensdaq');
-      ensureProviderConfig('SiliconFlow', defaultName: 'SiliconFlow');
-      ensureProviderConfig('AIhubmix', defaultName: 'AIhubmix');
-      final seededConfigs = _providerConfigs.map(
-        (key, config) => MapEntry(key, config.toJson()),
-      );
-      await prefs.setString(_providerConfigsKey, jsonEncode(seededConfigs));
-    }
-
     // kick off a one-time connectivity test for services (exclude local Bing)
     if (_searchAutoTestOnLaunch) {
       _initSearchConnectivityTests();
@@ -2320,7 +2490,7 @@ class SettingsProvider extends ChangeNotifier {
   }
 
   Set<String> _knownProviderKeys() => <String>{
-    ..._builtInProviderKeys,
+    ..._builtInProviderKeys.where((k) => !_removedBuiltInProviderKeys.contains(k)),
     ..._providerConfigs.keys,
   };
 
@@ -2343,8 +2513,12 @@ class SettingsProvider extends ChangeNotifier {
       nextOrder.add(k);
     }
     final mergedDefault = <String>[
-      ..._builtInProviderKeysInOrder,
-      ..._providerConfigs.keys.where((k) => !_builtInProviderKeys.contains(k)),
+      ..._builtInProviderKeysInOrder.where(
+        (k) => !_removedBuiltInProviderKeys.contains(k),
+      ),
+      ..._providerConfigs.keys.where(
+        (k) => !_builtInProviderKeys.contains(k),
+      ),
     ];
     for (final k in mergedDefault) {
       if (knownKeys.contains(k) && seen.add(k)) {
@@ -3138,11 +3312,27 @@ class SettingsProvider extends ChangeNotifier {
   Future<void> followSystem() => setThemeMode(ThemeMode.system);
 
   Future<void> setProviderConfig(String key, ProviderConfig config) async {
+    final wasRemovedBuiltIn = _removedBuiltInProviderKeys.remove(key);
     _providerConfigs[key] = config;
+    final orderOrGroupingChanged = _cleanupProviderOrderAndGrouping();
     notifyListeners();
     final prefs = _preferences;
     final map = _providerConfigs.map((k, v) => MapEntry(k, v.toJson()));
     await prefs.setString(_providerConfigsKey, jsonEncode(map));
+    if (wasRemovedBuiltIn) {
+      await prefs.setStringList(
+        _removedBuiltInProvidersKey,
+        _removedBuiltInProviderKeys.toList(),
+      );
+    }
+    if (orderOrGroupingChanged) {
+      await prefs.setStringList(_providersOrderKey, _providersOrder);
+      await prefs.setString(_providerGroupMapKey, jsonEncode(_providerGroupMap));
+      await prefs.setString(
+        _providerGroupCollapsedKey,
+        jsonEncode(_providerGroupCollapsed),
+      );
+    }
   }
 
   Future<int> deleteModels(String providerKey, Set<String> modelIds) async {
@@ -3437,8 +3627,15 @@ class SettingsProvider extends ChangeNotifier {
   }
 
   Future<void> removeProviderConfig(String key) async {
-    if (!_providerConfigs.containsKey(key)) return;
-    _providerConfigs.remove(key);
+    final hasConfig = _providerConfigs.containsKey(key);
+    final isBuiltIn = _builtInProviderKeys.contains(key);
+    if (!hasConfig && !isBuiltIn) return;
+    if (hasConfig) {
+      _providerConfigs.remove(key);
+    }
+    if (isBuiltIn) {
+      _removedBuiltInProviderKeys.add(key);
+    }
     // Remove from order
     _providersOrder = List<String>.from(_providersOrder.where((k) => k != key));
     // Also remove from grouping map
@@ -3505,6 +3702,10 @@ class SettingsProvider extends ChangeNotifier {
     final map = _providerConfigs.map((k, v) => MapEntry(k, v.toJson()));
     await prefs.setString(_providerConfigsKey, jsonEncode(map));
     await prefs.setStringList(_providersOrderKey, _providersOrder);
+    await prefs.setStringList(
+      _removedBuiltInProvidersKey,
+      _removedBuiltInProviderKeys.toList(),
+    );
     await prefs.setString(_providerGroupMapKey, jsonEncode(_providerGroupMap));
     notifyListeners();
   }
@@ -5673,6 +5874,7 @@ Requirements:
     copy._customThemes = _customThemes;
     copy._selectedCustomThemeId = _selectedCustomThemeId;
     copy._providerConfigs = _providerConfigs;
+    copy._removedBuiltInProviderKeys.addAll(_removedBuiltInProviderKeys);
     copy._pinnedModels.addAll(_pinnedModels);
     copy._currentModelProvider = _currentModelProvider;
     copy._currentModelId = _currentModelId;

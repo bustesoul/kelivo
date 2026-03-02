@@ -132,27 +132,6 @@ class _ProviderDetailPageState extends State<ProviderDetailPage> {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final l10n = AppLocalizations.of(context)!;
-    bool isUserAdded(String key) {
-      const fixed = {
-        'KelivoIN',
-        'OpenAI',
-        'Gemini',
-        'SiliconFlow',
-        'OpenRouter',
-        'DeepSeek',
-        'Tensdaq',
-        'AIhubmix',
-        '随想AI中转站',
-        'MaruCode',
-        'Aliyun',
-        'Zhipu AI',
-        'Claude',
-        'Grok',
-        'ByteDance',
-      };
-      return !fixed.contains(key);
-    }
-
     return Scaffold(
       appBar: AppBar(
         leading: Tooltip(
@@ -244,71 +223,70 @@ class _ProviderDetailPageState extends State<ProviderDetailPage> {
               },
             ),
           ),
-          if (isUserAdded(widget.keyName))
-            Tooltip(
-              message: l10n.providerDetailPageDeleteProviderTooltip,
-              child: _TactileIconButton(
-                icon: Lucide.Trash2,
-                color: cs.error,
-                semanticLabel: l10n.providerDetailPageDeleteProviderTooltip,
-                size: 22,
-                onTap: () async {
-                  final assistantProvider = context.read<AssistantProvider>();
-                  final chatService = context.read<ChatService>();
-                  final settings = context.read<SettingsProvider>();
-                  final confirm = await showDialog<bool>(
-                    context: context,
-                    builder: (ctx) => AlertDialog(
-                      title: Text(l10n.providerDetailPageDeleteProviderTitle),
-                      content: Text(
-                        l10n.providerDetailPageDeleteProviderContent,
+          Tooltip(
+            message: l10n.providerDetailPageDeleteProviderTooltip,
+            child: _TactileIconButton(
+              icon: Lucide.Trash2,
+              color: cs.error,
+              semanticLabel: l10n.providerDetailPageDeleteProviderTooltip,
+              size: 22,
+              onTap: () async {
+                final assistantProvider = context.read<AssistantProvider>();
+                final chatService = context.read<ChatService>();
+                final settings = context.read<SettingsProvider>();
+                final confirm = await showDialog<bool>(
+                  context: context,
+                  builder: (ctx) => AlertDialog(
+                    title: Text(l10n.providerDetailPageDeleteProviderTitle),
+                    content: Text(
+                      l10n.providerDetailPageDeleteProviderContent,
+                    ),
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.of(ctx).pop(false),
+                        child: Text(l10n.providerDetailPageCancelButton),
                       ),
-                      actions: [
-                        TextButton(
-                          onPressed: () => Navigator.of(ctx).pop(false),
-                          child: Text(l10n.providerDetailPageCancelButton),
-                        ),
-                        TextButton(
-                          onPressed: () => Navigator.of(ctx).pop(true),
-                          child: Text(
-                            l10n.providerDetailPageDeleteButton,
-                            style: TextStyle(
-                              color: Theme.of(context).colorScheme.error,
-                            ),
+                      TextButton(
+                        onPressed: () => Navigator.of(ctx).pop(true),
+                        child: Text(
+                          l10n.providerDetailPageDeleteButton,
+                          style: TextStyle(
+                            color: Theme.of(context).colorScheme.error,
                           ),
                         ),
-                      ],
-                    ),
-                  );
-                  if (confirm == true) {
-                    // Clear assistant-level model selections that reference this provider
-                    try {
-                      for (final a in assistantProvider.assistants) {
-                        if (a.chatModelProvider == widget.keyName) {
-                          await assistantProvider.updateAssistant(
-                            a.copyWith(clearChatModel: true),
-                          );
-                        }
+                      ),
+                    ],
+                  ),
+                );
+                if (confirm == true) {
+                  // Clear assistant-level model selections that reference this provider
+                  try {
+                    for (final a in assistantProvider.assistants) {
+                      if (a.chatModelProvider == widget.keyName) {
+                        await assistantProvider.updateAssistant(
+                          a.copyWith(clearChatModel: true),
+                        );
                       }
-                      // Conversations can pin a model too.
-                      await chatService.clearConversationModelOverrides(
-                        providerKey: widget.keyName,
-                      );
-                    } catch (_) {}
-
-                    // Remove provider config and related selections/pins
-                    await settings.removeProviderConfig(widget.keyName);
-                    if (!context.mounted) return;
-                    showAppSnackBar(
-                      context,
-                      message: l10n.providerDetailPageProviderDeletedSnackbar,
-                      type: NotificationType.success,
+                    }
+                    // Conversations can pin a model too.
+                    await chatService.clearConversationModelOverrides(
+                      providerKey: widget.keyName,
                     );
-                    Navigator.of(context).maybePop();
-                  }
-                },
-              ),
+                  } catch (_) {}
+
+                  // Remove provider config and related selections/pins
+                  await settings.removeProviderConfig(widget.keyName);
+                  if (!context.mounted) return;
+                  showAppSnackBar(
+                    context,
+                    message: l10n.providerDetailPageProviderDeletedSnackbar,
+                    type: NotificationType.success,
+                  );
+                  Navigator.of(context).maybePop();
+                }
+              },
             ),
+          ),
           const SizedBox(width: 12),
         ],
       ),
