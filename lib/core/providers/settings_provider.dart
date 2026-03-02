@@ -57,6 +57,8 @@ class SettingsProvider extends ChangeNotifier {
   };
   static const String _themeModeKey = 'theme_mode_v1';
   static const String _providerConfigsKey = 'provider_configs_v1';
+  static const String _removedBuiltInProvidersKey =
+      'removed_builtin_providers_v1';
   static const String _providerConfigsBackupKey = 'provider_configs_backup_v1';
   static const String _migrationsVersionKey = 'migrations_version_v1';
   static const int _embeddingOverridesMigrationVersion = 3;
@@ -237,6 +239,12 @@ class SettingsProvider extends ChangeNotifier {
 
   List<String> _providersOrder = const [];
   List<String> get providersOrder => _providersOrder;
+  final Set<String> _removedBuiltInProviderKeys = <String>{};
+  Set<String> get removedBuiltInProviderKeys =>
+      Set.unmodifiable(_removedBuiltInProviderKeys);
+  bool isBuiltInProviderKey(String key) => _builtInProviderKeys.contains(key);
+  bool isBuiltInProviderRemoved(String key) =>
+      _removedBuiltInProviderKeys.contains(key);
 
   // ===== Provider grouping =====
   List<ProviderGroup> _providerGroups = const <ProviderGroup>[];
@@ -443,6 +451,12 @@ class SettingsProvider extends ChangeNotifier {
   Future<void> _load() async {
     final prefs = await SharedPreferences.getInstance();
     _providersOrder = prefs.getStringList(_providersOrderKey) ?? [];
+    _removedBuiltInProviderKeys
+      ..clear()
+      ..addAll(
+        (prefs.getStringList(_removedBuiltInProvidersKey) ?? const <String>[])
+            .where(_builtInProviderKeys.contains),
+      );
     final m = prefs.getString(_themeModeKey);
     switch (m) {
       case 'light':
@@ -465,6 +479,7 @@ class SettingsProvider extends ChangeNotifier {
           (k, v) =>
               MapEntry(k, ProviderConfig.fromJson(v as Map<String, dynamic>)),
         );
+        _removedBuiltInProviderKeys.removeWhere(_providerConfigs.containsKey);
         providerConfigsLoaded = true;
       } catch (e, st) {
         assert(() {
@@ -958,15 +973,6 @@ class SettingsProvider extends ChangeNotifier {
         );
       } catch (_) {}
     }
-    if (_providerConfigs.isEmpty) {
-      // Seed a couple of sensible defaults on first launch, but do not recreate
-      // providers implicitly during later reads (e.g., when switching chats).
-      ensureProviderConfig('KelivoIN', defaultName: 'KelivoIN');
-      ensureProviderConfig('Tensdaq', defaultName: 'Tensdaq');
-      ensureProviderConfig('SiliconFlow', defaultName: 'SiliconFlow');
-      ensureProviderConfig('AIhubmix', defaultName: 'AIhubmix');
-    }
-
     // kick off a one-time connectivity test for services (exclude local Bing)
     if (_searchAutoTestOnLaunch) {
       _initSearchConnectivityTests();
@@ -1487,7 +1493,7 @@ class SettingsProvider extends ChangeNotifier {
   }
 
   Set<String> _knownProviderKeys() => <String>{
-    ..._builtInProviderKeys,
+    ..._builtInProviderKeys.where((k) => !_removedBuiltInProviderKeys.contains(k)),
     ..._providerConfigs.keys,
   };
 
@@ -1510,8 +1516,12 @@ class SettingsProvider extends ChangeNotifier {
       nextOrder.add(k);
     }
     final mergedDefault = <String>[
-      ..._builtInProviderKeysInOrder,
-      ..._providerConfigs.keys.where((k) => !_builtInProviderKeys.contains(k)),
+      ..._builtInProviderKeysInOrder.where(
+        (k) => !_removedBuiltInProviderKeys.contains(k),
+      ),
+      ..._providerConfigs.keys.where(
+        (k) => !_builtInProviderKeys.contains(k),
+      ),
     ];
     for (final k in mergedDefault) {
       if (knownKeys.contains(k) && seen.add(k)) {
@@ -1875,11 +1885,27 @@ class SettingsProvider extends ChangeNotifier {
   Future<void> followSystem() => setThemeMode(ThemeMode.system);
 
   Future<void> setProviderConfig(String key, ProviderConfig config) async {
+    final wasRemovedBuiltIn = _removedBuiltInProviderKeys.remove(key);
     _providerConfigs[key] = config;
+    final orderOrGroupingChanged = _cleanupProviderOrderAndGrouping();
     notifyListeners();
     final prefs = await SharedPreferences.getInstance();
     final map = _providerConfigs.map((k, v) => MapEntry(k, v.toJson()));
     await prefs.setString(_providerConfigsKey, jsonEncode(map));
+    if (wasRemovedBuiltIn) {
+      await prefs.setStringList(
+        _removedBuiltInProvidersKey,
+        _removedBuiltInProviderKeys.toList(),
+      );
+    }
+    if (orderOrGroupingChanged) {
+      await prefs.setStringList(_providersOrderKey, _providersOrder);
+      await prefs.setString(_providerGroupMapKey, jsonEncode(_providerGroupMap));
+      await prefs.setString(
+        _providerGroupCollapsedKey,
+        jsonEncode(_providerGroupCollapsed),
+      );
+    }
   }
 
   // ===== Provider Avatars =====
@@ -2088,8 +2114,15 @@ class SettingsProvider extends ChangeNotifier {
   }
 
   Future<void> removeProviderConfig(String key) async {
-    if (!_providerConfigs.containsKey(key)) return;
-    _providerConfigs.remove(key);
+    final hasConfig = _providerConfigs.containsKey(key);
+    final isBuiltIn = _builtInProviderKeys.contains(key);
+    if (!hasConfig && !isBuiltIn) return;
+    if (hasConfig) {
+      _providerConfigs.remove(key);
+    }
+    if (isBuiltIn) {
+      _removedBuiltInProviderKeys.add(key);
+    }
     // Remove from order
     _providersOrder = List<String>.from(_providersOrder.where((k) => k != key));
     // Also remove from grouping map
@@ -2142,6 +2175,10 @@ class SettingsProvider extends ChangeNotifier {
     final map = _providerConfigs.map((k, v) => MapEntry(k, v.toJson()));
     await prefs.setString(_providerConfigsKey, jsonEncode(map));
     await prefs.setStringList(_providersOrderKey, _providersOrder);
+    await prefs.setStringList(
+      _removedBuiltInProvidersKey,
+      _removedBuiltInProviderKeys.toList(),
+    );
     await prefs.setString(_providerGroupMapKey, jsonEncode(_providerGroupMap));
     notifyListeners();
   }
@@ -3187,6 +3224,7 @@ DO NOT GIVE ANSWERS OR DO HOMEWORK FOR THE USER. If the user asks a math or logi
     copy._providersOrder = _providersOrder;
     copy._themeMode = _themeMode;
     copy._providerConfigs = _providerConfigs;
+    copy._removedBuiltInProviderKeys.addAll(_removedBuiltInProviderKeys);
     copy._pinnedModels.addAll(_pinnedModels);
     copy._currentModelProvider = _currentModelProvider;
     copy._currentModelId = _currentModelId;

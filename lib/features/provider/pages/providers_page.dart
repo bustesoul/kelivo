@@ -49,12 +49,14 @@ class _ProvidersPageState extends State<ProvidersPage> {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final l10n = AppLocalizations.of(context)!;
+    final settings = context.watch<SettingsProvider>();
 
     // Base, fixed providers (recompute each build so dynamic additions reflect immediately)
-    final base = _providers(l10n: l10n);
+    final base = _providers(
+      l10n: l10n,
+    ).where((p) => !settings.isBuiltInProviderRemoved(p.keyName)).toList();
 
     // Dynamic providers from settings
-    final settings = context.watch<SettingsProvider>();
     final cfgs = settings.providerConfigs;
     final baseKeys = {for (final p in base) p.keyName};
     final dynamicItems = <_Provider>[];
@@ -317,27 +319,23 @@ class _ProvidersPageState extends State<ProvidersPage> {
               onMoveToGroup: _onMoveSelectedToGroup,
               onSelectAll: () {
                 setState(() {
-                  // Select all deletable (non-built-in) providers
-                  final baseKeys = {for (final p in base) p.keyName};
-                  final deletable = [
-                    for (final key in visibleProviderKeys)
-                      if (!baseKeys.contains(key)) key,
-                  ];
+                  // Select all currently visible providers.
+                  final candidates = [for (final key in visibleProviderKeys) key];
                   final allSelected =
-                      deletable.isNotEmpty &&
-                      deletable.every(_selected.contains) &&
-                      _selected.length == deletable.length;
-                  _selected.removeWhere((k) => !deletable.contains(k));
+                      candidates.isNotEmpty &&
+                      candidates.every(_selected.contains) &&
+                      _selected.length == candidates.length;
+                  _selected.removeWhere((k) => !candidates.contains(k));
                   if (allSelected) {
-                    // Unselect all deletable
-                    for (final k in deletable) {
+                    // Unselect all visible
+                    for (final k in candidates) {
                       _selected.remove(k);
                     }
                   } else {
-                    // Select all deletable
+                    // Select all visible
                     _selected
-                      ..removeWhere((k) => !deletable.contains(k))
-                      ..addAll(deletable);
+                      ..removeWhere((k) => !candidates.contains(k))
+                      ..addAll(candidates);
                   }
                 });
               },
@@ -534,16 +532,7 @@ class _ProvidersPageState extends State<ProvidersPage> {
   Future<void> _onDeleteSelected() async {
     if (_selected.isEmpty) return;
     final l10n = AppLocalizations.of(context)!;
-    // Skip built-in providers (default ones)
-    final builtInKeys = {for (final p in _providers(l10n: l10n)) p.keyName};
-    final keysToDelete = _selected
-        .where((k) => !builtInKeys.contains(k))
-        .toList(growable: false);
-
-    if (keysToDelete.isEmpty) {
-      // Nothing deletable selected
-      return;
-    }
+    final keysToDelete = _selected.toList(growable: false);
 
     final confirmed = await showDialog<bool>(
       context: context,
