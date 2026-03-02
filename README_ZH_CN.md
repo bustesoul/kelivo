@@ -26,13 +26,8 @@
 [![Download on the App Store](https://developer.apple.com/assets/elements/badges/download-on-the-app-store.svg)](https://apps.apple.com/us/app/kelivo/id6752122930)
 
 
-🔗 [下载最新版本](https://github.com/Chevey339/kelivo/releases/latest)
 
 🔗 [TestFlight](https://testflight.apple.com/join/PZZyRMyY) 参与测试版体验。
-
-## 💖 赞助
-
-感谢 [siliconflow.cn](https://siliconflow.cn) 与我们合作提供可免费使用的模型。
 
 ## ✨ 功能特性
 
@@ -59,7 +54,7 @@
 
 - ✅ Android
 - ✅ iOS
-- ✅ Harmony ([kelivo-ohos](https://github.com/Chevey339/kelivo-ohos))
+- ✅ Harmony (kelivo-ohos)
 - ✅ Windows
 - ✅ macOS
 - ✅ Linux
@@ -82,7 +77,6 @@
 
 如果你喜欢这个项目，可以给个Star ⭐
 
-[![Star History Chart](https://api.star-history.com/svg?repos=Chevey339/kelivo&type=Date)](https://star-history.com/#Chevey339/kelivo&Date)
 
 ## 📄 许可证
 
@@ -90,7 +84,7 @@
 
 ## 📞 联系我们
 
-- Issue: [GitHub Issues](https://github.com/Chevey339/kelivo/issues)
+- Issue: GitHub Issues
 
 ---
 

@@ -5,6 +5,11 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:package_info_plus/package_info_plus.dart';
 
+const String _repoOwner = 'bustezero';
+const String _repoName = 'kelivo';
+const String _repoWebBase = 'https://github.com/$_repoOwner/$_repoName';
+const String _repoApiBase = 'https://api.github.com/repos/$_repoOwner/$_repoName';
+
 class UpdateInfo {
   final String app;
   final String version;
@@ -67,14 +72,7 @@ class UpdateProvider extends ChangeNotifier {
     _error = null;
     notifyListeners();
     try {
-      final ts = DateTime.now().millisecondsSinceEpoch;
-      final url = Uri.parse('https://kelivo.psycheas.top/update.json?kelivo=$ts');
-      final resp = await http.get(url);
-      if (resp.statusCode != 200) {
-        throw Exception('HTTP ${resp.statusCode}');
-      }
-      final data = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
-      final info = UpdateInfo.fromJson(data);
+      final info = await _fetchLatestFromGitHub();
 
       final pkg = await PackageInfo.fromPlatform();
       final currentVer = pkg.version; // e.g., 1.0.0
@@ -90,18 +88,150 @@ class UpdateProvider extends ChangeNotifier {
     }
   }
 
+  Future<UpdateInfo> _fetchLatestFromGitHub() async {
+    final headers = <String, String>{
+      'Accept': 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+    };
+
+    final releaseUrl = Uri.parse('$_repoApiBase/releases/latest');
+    final releaseResp = await http.get(releaseUrl, headers: headers);
+    if (releaseResp.statusCode == 200) {
+      final data =
+          jsonDecode(utf8.decode(releaseResp.bodyBytes)) as Map<String, dynamic>;
+      return _parseGitHubRelease(data);
+    }
+    if (releaseResp.statusCode != 404) {
+      throw Exception('GitHub releases/latest HTTP ${releaseResp.statusCode}');
+    }
+
+    final tagsUrl = Uri.parse('$_repoApiBase/tags?per_page=1');
+    final tagsResp = await http.get(tagsUrl, headers: headers);
+    if (tagsResp.statusCode != 200) {
+      throw Exception('GitHub tags HTTP ${tagsResp.statusCode}');
+    }
+    final tags = jsonDecode(utf8.decode(tagsResp.bodyBytes)) as List<dynamic>;
+    if (tags.isEmpty) {
+      throw Exception('GitHub tags is empty');
+    }
+    final first = tags.first;
+    if (first is! Map<String, dynamic>) {
+      throw Exception('Invalid GitHub tags payload');
+    }
+
+    final rawTag = (first['name'] ?? '').toString().trim();
+    if (rawTag.isEmpty) {
+      throw Exception('GitHub tag name is empty');
+    }
+    final normalized = _normalizeVersion(rawTag);
+
+    return UpdateInfo(
+      app: '$_repoOwner/$_repoName',
+      version: normalized.isNotEmpty ? normalized : rawTag,
+      notes: null,
+      mandatory: false,
+      downloads: <String, String>{'universal': '$_repoWebBase/releases/tag/$rawTag'},
+    );
+  }
+
+  UpdateInfo _parseGitHubRelease(Map<String, dynamic> data) {
+    final rawTag = (data['tag_name'] ?? '').toString().trim();
+    final normalized = _normalizeVersion(rawTag);
+    final releasePage = (data['html_url'] ?? '').toString().trim();
+
+    DateTime? releasedAt;
+    final releasedRaw =
+        (data['published_at'] ?? data['created_at'])?.toString().trim();
+    if (releasedRaw != null && releasedRaw.isNotEmpty) {
+      try {
+        releasedAt = DateTime.parse(releasedRaw);
+      } catch (_) {}
+    }
+
+    final downloads = <String, String>{};
+    if (releasePage.isNotEmpty) {
+      downloads['universal'] = releasePage;
+    }
+
+    final assets = data['assets'];
+    if (assets is List) {
+      for (final item in assets) {
+        if (item is! Map) continue;
+        final name = (item['name'] ?? '').toString().toLowerCase();
+        final url = (item['browser_download_url'] ?? '').toString().trim();
+        if (name.isEmpty || url.isEmpty) continue;
+        final platformKey = _detectPlatformFromAssetName(name);
+        if (platformKey == null) continue;
+        downloads.putIfAbsent(platformKey, () => url);
+      }
+    }
+
+    if (downloads.isEmpty) {
+      downloads['universal'] = '$_repoWebBase/releases/latest';
+    }
+
+    final notes = (data['body'] ?? '').toString();
+    return UpdateInfo(
+      app: '$_repoOwner/$_repoName',
+      version: normalized.isNotEmpty ? normalized : rawTag,
+      releasedAt: releasedAt,
+      notes: notes.isEmpty ? null : notes,
+      mandatory: false,
+      downloads: downloads,
+    );
+  }
+
+  String? _detectPlatformFromAssetName(String name) {
+    if (name.contains('android') || name.endsWith('.apk') || name.endsWith('.aab')) {
+      return 'android';
+    }
+    if (name.contains('ios') || name.endsWith('.ipa')) {
+      return 'ios';
+    }
+    if (name.contains('mac') || name.endsWith('.dmg') || name.endsWith('.pkg')) {
+      return 'macos';
+    }
+    if (name.contains('windows') ||
+        name.contains('win') ||
+        name.endsWith('.exe') ||
+        name.endsWith('.msi')) {
+      return 'windows';
+    }
+    if (name.contains('linux') ||
+        name.endsWith('.appimage') ||
+        name.endsWith('.deb') ||
+        name.endsWith('.rpm')) {
+      return 'linux';
+    }
+    return null;
+  }
+
+  String _normalizeVersion(String input) {
+    final raw = input.trim();
+    if (raw.isEmpty) return '';
+    final matched = RegExp(r'(\d+)(?:\.(\d+))?(?:\.(\d+))?').firstMatch(raw);
+    if (matched == null) {
+      return raw.replaceFirst(RegExp(r'^[vV]'), '');
+    }
+    final major = matched.group(1) ?? '0';
+    final minor = matched.group(2) ?? '0';
+    final patch = matched.group(3) ?? '0';
+    return '$major.$minor.$patch';
+  }
+
   bool _isRemoteNewer({
     required String remoteVersion,
     required String currentVersion,
   }) {
     // Compare semantic versions only (ignore internal build numbers)
     List<int> parseVer(String v) {
-      final parts = v.split('.');
-      final nums = <int>[];
-      for (int i = 0; i < 3; i++) {
-        nums.add(i < parts.length ? int.tryParse(parts[i]) ?? 0 : 0);
-      }
-      return nums;
+      final matched = RegExp(r'(\d+)(?:\.(\d+))?(?:\.(\d+))?').firstMatch(v);
+      if (matched == null) return const <int>[0, 0, 0];
+      return <int>[
+        int.tryParse(matched.group(1) ?? '0') ?? 0,
+        int.tryParse(matched.group(2) ?? '0') ?? 0,
+        int.tryParse(matched.group(3) ?? '0') ?? 0,
+      ];
     }
     final a = parseVer(remoteVersion);
     final b = parseVer(currentVersion);

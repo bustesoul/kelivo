@@ -26,13 +26,8 @@ English | [简体中文](README_ZH_CN.md)
 
 [![Download on the App Store](https://developer.apple.com/assets/elements/badges/download-on-the-app-store.svg)](https://apps.apple.com/us/app/kelivo/id6752122930)
 
-🔗 [Download the latest version](https://github.com/Chevey339/kelivo/releases/latest)
 
 🔗 [TestFlight](https://testflight.apple.com/join/PZZyRMyY) for beta testing.
-
-## 💖 Sponsors
-
-Thanks to [siliconflow.cn](https://siliconflow.cn) for providing free models in cooperation with us.
 
 ## ✨ Features
 
@@ -59,7 +54,7 @@ Thanks to [siliconflow.cn](https://siliconflow.cn) for providing free models in 
 
 - ✅ Android
 - ✅ iOS
-- ✅ Harmony ([kelivo-ohos](https://github.com/Chevey339/kelivo-ohos))
+- ✅ Harmony (kelivo-ohos)
 - ✅ Windows
 - ✅ macOS
 - ✅ Linux
@@ -82,7 +77,6 @@ Special thanks to the [RikkaHub](https://github.com/re-ovo/rikkahub) project for
 
 If you like this project, please give it a star ⭐
 
-[![Star History Chart](https://api.star-history.com/svg?repos=Chevey339/kelivo&type=Date)](https://star-history.com/#Chevey339/kelivo&Date)
 
 ## 📄 License
 
@@ -90,7 +84,7 @@ This project is licensed under the AGPL-3.0 License - see the [LICENSE](LICENSE)
 
 ## 📞 Contact Us
 
-- Issue: [GitHub Issues](https://github.com/Chevey339/kelivo/issues)
+- Issue: GitHub Issues
 
 ---
 
