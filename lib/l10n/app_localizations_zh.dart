@@ -259,34 +259,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settingsPageLogs => '日志';
 
   @override
-  String get settingsPageSponsor => '赞助';
-
-  @override
   String get settingsPageShare => '分享';
-
-  @override
-  String get sponsorPageMethodsSectionTitle => '赞助方式';
-
-  @override
-  String get sponsorPageSponsorsSectionTitle => '赞助用户';
-
-  @override
-  String get sponsorPageEmpty => '暂无赞助者';
-
-  @override
-  String get sponsorPageAfdianTitle => '爱发电';
-
-  @override
-  String get sponsorPageAfdianSubtitle => 'afdian.com/a/kelivo';
-
-  @override
-  String get sponsorPageWeChatTitle => '微信赞助';
-
-  @override
-  String get sponsorPageWeChatSubtitle => '微信赞助码';
-
-  @override
-  String get sponsorPageScanQrHint => '扫描二维码赞助';
 
   @override
   String get languageDisplaySimplifiedChinese => '简体中文';
@@ -4561,34 +4534,7 @@ class AppLocalizationsZhHans extends AppLocalizationsZh {
   String get settingsPageLogs => '日志';
 
   @override
-  String get settingsPageSponsor => '赞助';
-
-  @override
   String get settingsPageShare => '分享';
-
-  @override
-  String get sponsorPageMethodsSectionTitle => '赞助方式';
-
-  @override
-  String get sponsorPageSponsorsSectionTitle => '赞助用户';
-
-  @override
-  String get sponsorPageEmpty => '暂无赞助者';
-
-  @override
-  String get sponsorPageAfdianTitle => '爱发电';
-
-  @override
-  String get sponsorPageAfdianSubtitle => 'afdian.com/a/kelivo';
-
-  @override
-  String get sponsorPageWeChatTitle => '微信赞助';
-
-  @override
-  String get sponsorPageWeChatSubtitle => '微信赞助码';
-
-  @override
-  String get sponsorPageScanQrHint => '扫描二维码赞助';
 
   @override
   String get languageDisplaySimplifiedChinese => '简体中文';
@@ -8811,34 +8757,7 @@ class AppLocalizationsZhHant extends AppLocalizationsZh {
   String get settingsPageLogs => '日誌';
 
   @override
-  String get settingsPageSponsor => '贊助';
-
-  @override
   String get settingsPageShare => '分享';
-
-  @override
-  String get sponsorPageMethodsSectionTitle => '贊助方式';
-
-  @override
-  String get sponsorPageSponsorsSectionTitle => '贊助用戶';
-
-  @override
-  String get sponsorPageEmpty => '暫無贊助者';
-
-  @override
-  String get sponsorPageAfdianTitle => '愛發電';
-
-  @override
-  String get sponsorPageAfdianSubtitle => 'afdian.com/a/kelivo';
-
-  @override
-  String get sponsorPageWeChatTitle => '微信贊助';
-
-  @override
-  String get sponsorPageWeChatSubtitle => '微信贊助碼';
-
-  @override
-  String get sponsorPageScanQrHint => '掃描二維碼贊助';
 
   @override
   String get languageDisplaySimplifiedChinese => '简体中文';
