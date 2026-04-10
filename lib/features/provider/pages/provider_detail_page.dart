@@ -222,9 +222,7 @@ class _ProviderDetailPageState extends State<ProviderDetailPage> {
                   context: context,
                   builder: (ctx) => AlertDialog(
                     title: Text(l10n.providerDetailPageDeleteProviderTitle),
-                    content: Text(
-                      l10n.providerDetailPageDeleteProviderContent,
-                    ),
+                    content: Text(l10n.providerDetailPageDeleteProviderContent),
                     actions: [
                       TextButton(
                         onPressed: () => Navigator.of(ctx).pop(false),

@@ -203,14 +203,14 @@ class _DesktopProvidersBodyState extends State<_DesktopProvidersBody> {
                 child: Text(l10n.providerDetailPageCancelButton),
               ),
               TextButton(
-              onPressed: () => Navigator.of(ctx).pop(true),
-              child: Text(
-                l10n.providerDetailPageDeleteButton,
-                style: const TextStyle(color: Colors.red),
+                onPressed: () => Navigator.of(ctx).pop(true),
+                child: Text(
+                  l10n.providerDetailPageDeleteButton,
+                  style: const TextStyle(color: Colors.red),
+                ),
               ),
-            ),
-          ],
-        ),
+            ],
+          ),
         );
         if (ok != true) return;
         try {
