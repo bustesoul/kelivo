@@ -434,7 +434,9 @@ class _ProvidersPageState extends State<ProvidersPage> {
               onSelectAll: () {
                 setState(() {
                   // Select all currently visible providers.
-                  final candidates = [for (final key in visibleProviderKeys) key];
+                  final candidates = [
+                    for (final key in visibleProviderKeys) key,
+                  ];
                   final allSelected =
                       candidates.isNotEmpty &&
                       candidates.every(_selected.contains) &&

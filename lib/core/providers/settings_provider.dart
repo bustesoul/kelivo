@@ -2000,7 +2000,9 @@ class SettingsProvider extends ChangeNotifier {
   }
 
   Set<String> _knownProviderKeys() => <String>{
-    ..._builtInProviderKeys.where((k) => !_removedBuiltInProviderKeys.contains(k)),
+    ..._builtInProviderKeys.where(
+      (k) => !_removedBuiltInProviderKeys.contains(k),
+    ),
     ..._providerConfigs.keys,
   };
 
@@ -2026,9 +2028,7 @@ class SettingsProvider extends ChangeNotifier {
       ..._builtInProviderKeysInOrder.where(
         (k) => !_removedBuiltInProviderKeys.contains(k),
       ),
-      ..._providerConfigs.keys.where(
-        (k) => !_builtInProviderKeys.contains(k),
-      ),
+      ..._providerConfigs.keys.where((k) => !_builtInProviderKeys.contains(k)),
     ];
     for (final k in mergedDefault) {
       if (knownKeys.contains(k) && seen.add(k)) {
@@ -2558,7 +2558,10 @@ class SettingsProvider extends ChangeNotifier {
     }
     if (orderOrGroupingChanged) {
       await prefs.setStringList(_providersOrderKey, _providersOrder);
-      await prefs.setString(_providerGroupMapKey, jsonEncode(_providerGroupMap));
+      await prefs.setString(
+        _providerGroupMapKey,
+        jsonEncode(_providerGroupMap),
+      );
       await prefs.setString(
         _providerGroupCollapsedKey,
         jsonEncode(_providerGroupCollapsed),
