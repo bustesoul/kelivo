@@ -88,6 +88,81 @@ class MarkdownWithCodeHighlight extends StatefulWidget {
   // Increase k if lists still look larger at small scales; decrease if too small at large scales.
   static const double kMarkdownListScaleCompensation = 0.84;
 
+  static const List<String> _malformedFenceLanguagePrefixes = <String>[
+    'objectivec',
+    'typescript',
+    'javascript',
+    'dockerfile',
+    'plaintext',
+    'markdown',
+    'plantuml',
+    'csharp',
+    'golang',
+    'mermaid',
+    'kotlin',
+    'python',
+    'swift',
+    'shell',
+    'bash',
+    'yaml',
+    'json',
+    'toml',
+    'ruby',
+    'php',
+    'dart',
+    'sql',
+    'html',
+    'java',
+    'xml',
+    'diff',
+    'ini',
+    'env',
+    'zsh',
+    'plain',
+    'sh',
+    'go',
+    'ts',
+    'js',
+    'py',
+    'rb',
+    'kt',
+    'cs',
+    'md',
+    'yml',
+    'c#',
+  ];
+
+  static final String _malformedFenceLanguagePattern =
+      _malformedFenceLanguagePrefixes.map(RegExp.escape).join('|');
+
+  static final RegExp _malformedFenceOpenWithSpaceRe = RegExp(
+    r'^([ \t]{0,3})([`~]{3,})(' +
+        _malformedFenceLanguagePattern +
+        r')([ \t]+)(\S.*)$',
+    multiLine: true,
+    caseSensitive: false,
+  );
+
+  static final RegExp _malformedFenceOpenAttachedRe = RegExp(
+    r'^([ \t]{0,3})([`~]{3,})(' + _malformedFenceLanguagePattern + r')(\S.*)$',
+    multiLine: true,
+    caseSensitive: false,
+  );
+
+  static final RegExp _malformedFenceWithPrefixSpaceRe = RegExp(
+    r'^([ \t]*\S.*?)([`~]{3,})(' +
+        _malformedFenceLanguagePattern +
+        r')([ \t]+)(\S.*)$',
+    multiLine: true,
+    caseSensitive: false,
+  );
+
+  static final RegExp _malformedFenceWithPrefixAttachedRe = RegExp(
+    r'^([ \t]*\S.*?)([`~]{3,})(' + _malformedFenceLanguagePattern + r')(\S.*)$',
+    multiLine: true,
+    caseSensitive: false,
+  );
+
   @override
   State<MarkdownWithCodeHighlight> createState() =>
       _MarkdownWithCodeHighlightState();
@@ -580,6 +655,532 @@ class _MarkdownWithCodeHighlightState extends State<MarkdownWithCodeHighlight> {
             child: markdownWidget,
           );
     return result;
+  }
+
+  static String _displayLanguage(BuildContext context, String? raw) {
+    final zh = _isZh(context);
+    final t = raw?.trim();
+    if (t != null && t.isNotEmpty) return t;
+    return zh ? '代码' : 'Code';
+  }
+
+  static bool _isZh(BuildContext context) =>
+      Localizations.localeOf(context).languageCode == 'zh';
+
+  static Map<String, TextStyle> _transparentBgTheme(
+    Map<String, TextStyle> base,
+  ) {
+    final m = Map<String, TextStyle>.from(base);
+    final root = base['root'];
+    if (root != null) {
+      m['root'] = root.copyWith(backgroundColor: Colors.transparent);
+    } else {
+      m['root'] = const TextStyle(backgroundColor: Colors.transparent);
+    }
+    return m;
+  }
+
+  static String? _normalizeLanguage(String? lang) {
+    if (lang == null || lang.trim().isEmpty) return null;
+    final l = lang.trim().toLowerCase();
+    switch (l) {
+      case 'js':
+      case 'javascript':
+        return 'javascript';
+      case 'ts':
+      case 'typescript':
+        return 'typescript';
+      case 'sh':
+      case 'zsh':
+      case 'bash':
+      case 'shell':
+        return 'bash';
+      case 'yml':
+        return 'yaml';
+      case 'py':
+      case 'python':
+        return 'python';
+      case 'rb':
+      case 'ruby':
+        return 'ruby';
+      case 'kt':
+      case 'kotlin':
+        return 'kotlin';
+      case 'java':
+        return 'java';
+      case 'c#':
+      case 'cs':
+      case 'csharp':
+        return 'csharp';
+      case 'objc':
+      case 'objectivec':
+        return 'objectivec';
+      case 'swift':
+        return 'swift';
+      case 'go':
+      case 'golang':
+        return 'go';
+      case 'php':
+        return 'php';
+      case 'dart':
+        return 'dart';
+      case 'json':
+        return 'json';
+      case 'html':
+        return 'xml';
+      case 'md':
+      case 'markdown':
+        return 'markdown';
+      case 'sql':
+        return 'sql';
+      default:
+        return l; // try as-is
+    }
+  }
+
+  static String _preprocessFences(
+    String input, {
+    required bool enableMath,
+    required bool enableDollarLatex,
+  }) {
+    // Normalize newlines to simplify regex handling
+    var out = input.replaceAll('\r\n', '\n');
+
+    // STEP 1: Normalize malformed fenced code blocks before masking.
+    // This keeps repair isolated from the later code masking pipeline and
+    // avoids placeholder leakage such as __CODE_MASK_* ending up in output.
+    out = _normalizeMalformedFences(out);
+    // STEP 2: MASKING - Protect code blocks from LaTeX processing.
+    // This prevents $...$ inside code from being converted to LaTeX.
+    final Map<String, String> codeMap = {};
+    int codeCount = 0;
+
+    // Match fenced code blocks and inline code (`...`)
+    // Fenced: CommonMark-style variable-length fences (>= 3 backticks or tildes)
+    // Group 1: entire fenced block, Group 2: opening fence, Group 3: fence char
+    // Closing fence must use same char and be >= opening length
+    final codeRegex = RegExp(
+      r'([ \t]*(([`~])\3{2,})[ \t]*[^\n]*\n(?:[\s\S]*?^[ \t]*\2\3*[ \t]*$|[\s\S]*))'
+      r'|(?<!`)`[^`\n]+`(?!`)',
+      multiLine: true,
+    );
+
+    String maskCodeBlocks(String value, RegExp regex) {
+      return value.replaceAllMapped(regex, (match) {
+        final key = '__CODE_MASK_${codeCount++}__';
+        var codeContent = match.group(0)!;
+
+        // For inline code (`...`), escape dollar signs to prevent LaTeX interpretation
+        // Inline code is single-line and delimited by single backticks (not fenced)
+        final isInlineCode =
+            !codeContent.contains('\n') &&
+            codeContent.startsWith('`') &&
+            codeContent.endsWith('`');
+        if (isInlineCode) {
+          codeContent = codeContent.replaceAllMapped(
+            RegExp(r'\$'),
+            (m) => '___CODE_DOLLAR_MASK___',
+          );
+        }
+
+        codeMap[key] = codeContent;
+        return key;
+      });
+    }
+
+    // Repair may create new valid fenced blocks, so mask once after
+    // normalization before the rest of the markdown preprocessing runs.
+    out = maskCodeBlocks(out, codeRegex);
+
+    // STEP 3: PROCESSING (on masked string, code is now protected)
+
+    // 2025-10-23 Fix: Remove title attributes from markdown links to work around gpt_markdown's
+    // link regex limitation. The package's regex `[^\s]*` stops at spaces, so
+    // [text](url "title") breaks. Strip titles while preserving the URL.
+    // Matches: [text](url "title") or [text](url 'title') or [text](url title)
+    final linkWithTitle = RegExp(r'\[([^\]]+)\]\(([^\s)]+)\s+[^)]*\)');
+    out = out.replaceAllMapped(linkWithTitle, (match) {
+      final text = match.group(1);
+      final url = match.group(2);
+      return '[$text]($url)';
+    });
+
+    // Normalize inline $...$ math into \( ... \) so it always matches the LaTeX
+    // renderer (even when vendors emit single-dollar math mixed with prose).
+    // Skips $$...$$ blocks, which are handled separately.
+    // NOW SAFE: Code blocks are masked, so $variables in code won't be converted.
+    if (enableMath && enableDollarLatex) {
+      // Require that the matched inline math does not cross table column separators (|)
+      // to avoid breaking markdown tables.
+      final inlineDollar = RegExp(r"(?<!\$)\$([^\$\n|]+?)\$(?!\$)");
+      out = out.replaceAllMapped(inlineDollar, (m) {
+        return "\\(${m[1]}\\)";
+      });
+    }
+
+    // Ensure display-math blocks stay as standalone blocks even when generated inline.
+    // Some providers emit "$$...$$" inside list items or paragraphs; without extra
+    // newlines gpt_markdown may treat them as plain text. We normalize multi-line
+    // display math into its own block to guarantee rendering.
+    final inlineDisplayMath = RegExp(r"\$\$([\s\S]*?)\$\$");
+    out = out.replaceAllMapped(inlineDisplayMath, (m) {
+      final body = (m.group(1) ?? '').trim();
+      // Only normalize true display math (multi-line or clearly not inline literals)
+      if (body.isEmpty) {
+        return m[0]!;
+      }
+      final hasNewline = body.contains('\n');
+      if (!hasNewline && body.length < 12) {
+        return m[0]!; // looks like inline literal, leave intact
+      }
+      // Surround with blank lines to force a block; keep existing body trimmed
+      final prefix = m.start == 0 || out.substring(0, m.start).endsWith('\n\n')
+          ? ''
+          : '\n';
+      final suffix =
+          m.end == out.length || out.substring(m.end).startsWith('\n\n')
+          ? ''
+          : '\n';
+      return '$prefix\$\$\n$body\n\$\$$suffix';
+    });
+
+    // 1) Move fenced code from list lines to the next line: "* ```lang" -> "*\n```lang"
+    final bulletFence = RegExp(
+      r"^(\s*(?:[*+-]|\d+\.)\s+)```([^\s`]*)\s*$",
+      multiLine: true,
+    );
+    out = out.replaceAllMapped(bulletFence, (m) => "${m[1]}\n```${m[2]}");
+
+    // 2) Dedent opening fences: leading spaces before ```lang
+    final dedentOpen = RegExp(r"^[ \t]+```([^\n`]*)\s*$", multiLine: true);
+    out = out.replaceAllMapped(dedentOpen, (m) => "```${m[1]}");
+
+    // 3) Dedent closing fences: leading spaces before ```
+    final dedentClose = RegExp(r"^[ \t]+```\s*$", multiLine: true);
+    out = out.replaceAllMapped(dedentClose, (m) => "```");
+
+    // 4) Ensure closing fences are on their own line: transform "} ```" or "}```" into "}\n```"
+    final inlineClosing = RegExp(r"([^\r\n`])```(?=\s*(?:\r?\n|$))");
+    out = out.replaceAllMapped(inlineClosing, (m) => "${m[1]}\n```");
+
+    // 5) Disambiguate Setext vs HR after label-value lines:
+    // If a line of only dashes follows a bold label line (e.g., "**作者:** 张三"),
+    // insert a blank line so it's treated as an HR, not a Setext heading underline.
+    final labelThenDash = RegExp(
+      r"^(\*\*[^\n*]+\*\*.*)\n(\s*-{3,}\s*$)",
+      multiLine: true,
+    );
+    out = out.replaceAllMapped(labelThenDash, (m) => "${m[1]}\n\n${m[2]}");
+
+    // 6) Allow ATX headings starting with enumerations like "## 1.引言" or "## 1. 引言"
+    // Insert a zero-width non-joiner after the dot to prevent list parsing without changing visual text.
+    final atxEnum = RegExp(
+      r"^(\s{0,3}#{1,6}\s+\d+)\.(\s*)(\S)",
+      multiLine: true,
+    );
+    out = out.replaceAllMapped(atxEnum, (m) => "${m[1]}.\u200C${m[2]}${m[3]}");
+
+    // 7) Normalize double-bracket citation links: [[n]](url) → [n](url)
+    //    Many LLMs with built-in web search (DashScope, Perplexity, etc.) emit
+    //    citations as [[1]](url), where the inner [1] is the display text. The
+    //    link regex cannot match nested brackets, so flatten them first.
+    final doubleBracketLink = RegExp(r'\[\[([^\]]+)\]\]\(([^\s)]+)\)');
+    out = out.replaceAllMapped(doubleBracketLink, (m) => '[${m[1]}](${m[2]})');
+
+    // 8) Fix: when multiple markdown links are placed on separate lines using
+    //    trailing double-spaces (hard line breaks), gpt_markdown may treat them
+    //    as a single paragraph and only render the first link correctly.
+    //    To avoid this, convert such lines into separate paragraphs by
+    //    inserting an extra blank line after lines that end with a markdown
+    //    link and have at least two trailing spaces.
+    //    Example affected pattern:
+    //      Label：[text](url)  \nNext： [text](url)  \n
+    final linkWithTrailingSpaces = RegExp(r"\[[^\]]+\]\([^\)]+\)\s{2,}$");
+    final lines = out.split('\n');
+    if (lines.length > 1) {
+      final buf = StringBuffer();
+      for (int i = 0; i < lines.length; i++) {
+        final line = lines[i];
+        buf.write(line);
+        if (i < lines.length - 1) buf.write('\n');
+        if (linkWithTrailingSpaces.hasMatch(line)) {
+          // Ensure a blank line to break the paragraph for the next line
+          buf.write('\n');
+        }
+      }
+      out = buf.toString();
+    }
+
+    // STEP 4: UNMASKING - Restore code blocks
+    // Replace all mask placeholders with their original content
+    // NOTE: We do NOT restore ___CODE_DOLLAR_MASK___ here because we want LaTeX components
+    // to never see dollar signs inside code. The unmask will happen later in highlightBuilder.
+    out = out.replaceAllMapped(RegExp(r'__CODE_MASK_\d+__'), (match) {
+      final key = match.group(0)!;
+      return codeMap[key] ?? key;
+    });
+
+    return out;
+  }
+
+  /// Visible for tests so malformed fence repairs can be asserted directly.
+  static String preprocessFencesForTesting(
+    String input, {
+    required bool enableMath,
+    required bool enableDollarLatex,
+  }) {
+    return _preprocessFences(
+      input,
+      enableMath: enableMath,
+      enableDollarLatex: enableDollarLatex,
+    );
+  }
+
+  static String repairMalformedFencesForTesting(String input) {
+    return _normalizeMalformedFences(input.replaceAll('\r\n', '\n'));
+  }
+
+  static String _normalizeMalformedFences(String input) {
+    final lines = input.split('\n');
+    final normalized = <String>[];
+
+    bool inValidFence = false;
+    String validFenceChar = '';
+    int validFenceLength = 0;
+
+    bool inRepairedFence = false;
+    String repairedFenceToken = '';
+
+    for (final line in lines) {
+      if (inValidFence) {
+        normalized.add(line);
+        if (_isFenceClosingLine(line, validFenceChar, validFenceLength)) {
+          inValidFence = false;
+          validFenceChar = '';
+          validFenceLength = 0;
+        }
+        continue;
+      }
+
+      if (inRepairedFence) {
+        if (_isFenceClosingLine(
+          line,
+          repairedFenceToken[0],
+          repairedFenceToken.length,
+        )) {
+          normalized.add(line.trimLeft());
+          inRepairedFence = false;
+          repairedFenceToken = '';
+          continue;
+        }
+
+        final split = _splitTrailingClosingFence(line, repairedFenceToken);
+        normalized.add(split.body);
+        if (split.closingFence != null) {
+          normalized.add(split.closingFence!);
+          inRepairedFence = false;
+          repairedFenceToken = '';
+        }
+        continue;
+      }
+
+      final malformed = _matchMalformedFenceLine(line);
+      if (malformed != null) {
+        final prefixText = malformed.prefix.trimRight();
+        if (prefixText.isNotEmpty) {
+          normalized.add(prefixText);
+        }
+
+        normalized.add('${malformed.fenceToken}${malformed.language}');
+
+        final split = _splitTrailingClosingFence(
+          malformed.body,
+          malformed.fenceToken,
+        );
+        normalized.add(split.body);
+
+        if (split.closingFence != null) {
+          normalized.add(split.closingFence!);
+        } else {
+          inRepairedFence = true;
+          repairedFenceToken = malformed.fenceToken;
+        }
+        continue;
+      }
+
+      final validFence = _parseFenceOpenerLine(line);
+      if (validFence != null) {
+        normalized.add(line);
+        inValidFence = true;
+        validFenceChar = validFence.fenceChar;
+        validFenceLength = validFence.fenceLength;
+        continue;
+      }
+
+      normalized.add(line);
+    }
+
+    return normalized.join('\n');
+  }
+
+  static ({String body, String? closingFence}) _splitTrailingClosingFence(
+    String text,
+    String fenceToken,
+  ) {
+    final body = text.trimRight();
+    if (body.isEmpty) {
+      return (body: body, closingFence: null);
+    }
+
+    final fenceChar = fenceToken[0];
+    final minLen = fenceToken.length;
+    final closingRe = RegExp(
+      r'^(.*?)([ \t]*' +
+          RegExp.escape(fenceChar) +
+          r'{' +
+          minLen.toString() +
+          r',}[ \t]*)$',
+      dotAll: true,
+    );
+    final match = closingRe.firstMatch(body);
+    if (match == null) {
+      return (body: body, closingFence: null);
+    }
+
+    final codeBody = (match.group(1) ?? '').trimRight();
+    final closingFence = (match.group(2) ?? '').trim();
+    if (closingFence.isEmpty) {
+      return (body: body, closingFence: null);
+    }
+
+    return (body: codeBody, closingFence: closingFence);
+  }
+
+  static ({String prefix, String fenceToken, String language, String body})?
+  _matchMalformedFenceLine(String line) {
+    final spaced = _malformedFenceOpenWithSpaceRe.firstMatch(line);
+    if (spaced != null) {
+      return (
+        prefix: spaced[1]!,
+        fenceToken: spaced[2]!,
+        language: spaced[3]!,
+        body: spaced[5]!,
+      );
+    }
+
+    final attached = _malformedFenceOpenAttachedRe.firstMatch(line);
+    if (attached != null) {
+      return (
+        prefix: attached[1]!,
+        fenceToken: attached[2]!,
+        language: attached[3]!,
+        body: attached[4]!,
+      );
+    }
+
+    final prefixedSpace = _malformedFenceWithPrefixSpaceRe.firstMatch(line);
+    if (prefixedSpace != null) {
+      return (
+        prefix: prefixedSpace[1]!,
+        fenceToken: prefixedSpace[2]!,
+        language: prefixedSpace[3]!,
+        body: prefixedSpace[5]!,
+      );
+    }
+
+    final prefixedAttached = _malformedFenceWithPrefixAttachedRe.firstMatch(
+      line,
+    );
+    if (prefixedAttached != null) {
+      return (
+        prefix: prefixedAttached[1]!,
+        fenceToken: prefixedAttached[2]!,
+        language: prefixedAttached[3]!,
+        body: prefixedAttached[4]!,
+      );
+    }
+
+    return null;
+  }
+
+  static ({String fenceChar, int fenceLength})? _parseFenceOpenerLine(
+    String line,
+  ) {
+    final leadingSpaces = RegExp(r'^[ \t]{0,3}').stringMatch(line) ?? '';
+    final stripped = line.substring(leadingSpaces.length);
+    if (stripped.length < 3) return null;
+
+    final fenceChar = stripped[0];
+    if (fenceChar != '`' && fenceChar != '~') {
+      return null;
+    }
+
+    var fenceLength = 0;
+    while (fenceLength < stripped.length &&
+        stripped[fenceLength] == fenceChar) {
+      fenceLength++;
+    }
+    if (fenceLength < 3) return null;
+
+    final rest = stripped.substring(fenceLength).trim();
+    if (fenceChar == '`' && rest.contains('`')) {
+      return null;
+    }
+
+    return (fenceChar: fenceChar, fenceLength: fenceLength);
+  }
+
+  static bool _isFenceClosingLine(
+    String line,
+    String fenceChar,
+    int minLength,
+  ) {
+    if (fenceChar.isEmpty || minLength < 3) return false;
+    final leadingIndent = RegExp(r'^[ \t]*').stringMatch(line) ?? '';
+    if (leadingIndent.length > 3) return false;
+    final stripped = line.substring(leadingIndent.length);
+    if (stripped.length < minLength) return false;
+    final minimumFence = List.filled(minLength, fenceChar).join();
+    if (!stripped.startsWith(minimumFence)) return false;
+
+    var fenceLength = 0;
+    while (fenceLength < stripped.length &&
+        stripped[fenceLength] == fenceChar) {
+      fenceLength++;
+    }
+
+    if (fenceLength < minLength) return false;
+    return stripped.substring(fenceLength).trim().isEmpty;
+  }
+
+  // Safe math renderer that falls back to plain text when parsing fails.
+  static Widget _renderMath(
+    String tex, {
+    TextStyle? style,
+    MathStyle mathStyle = MathStyle.text,
+  }) {
+    final resolved = style ?? const TextStyle();
+    try {
+      return Math.tex(
+        tex,
+        mathStyle: mathStyle,
+        textStyle: resolved,
+        onErrorFallback: (err) => Text(tex, style: resolved),
+      );
+    } catch (_) {
+      return Text(tex, style: resolved);
+    }
+  }
+
+  static String _softBreakInline(String input) {
+    // Insert zero-width break for inline code segments with long tokens.
+    if (input.length < 60) return input;
+    final buf = StringBuffer();
+    for (int i = 0; i < input.length; i++) {
+      buf.write(input[i]);
+      if ((i + 1) % 24 == 0) buf.write('\u200B');
+    }
+    return buf.toString();
   }
 
   Future<void> _handleLinkTap(BuildContext context, String url) async {
