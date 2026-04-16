@@ -28,6 +28,7 @@ import '../../../shared/widgets/ios_tactile.dart';
 import 'multi_key_manager_page.dart';
 import 'provider_network_page.dart';
 import '../../../core/services/haptics.dart';
+import '../utils/provider_model_batch_test_runner.dart';
 import '../../provider/widgets/provider_avatar.dart';
 import '../../../utils/model_grouping.dart';
 
@@ -68,9 +69,10 @@ class _ProviderDetailPageState extends State<ProviderDetailPage> {
   final Set<String> _selectedModels = {};
   bool _isDetecting = false;
   bool _detectUseStream = false;
+  bool _detectUseConcurrent = true;
   final Map<String, bool> _detectionResults = {};
   final Map<String, String> _detectionErrorMessages = {};
-  String? _currentDetectingModel;
+  final Set<String> _detectingModels = {};
   final Set<String> _pendingModels = {};
   bool _aihubmixAppCodeEnabled = false;
 
@@ -1215,7 +1217,7 @@ class _ProviderDetailPageState extends State<ProviderDetailPage> {
                       },
                       detectionResult: _detectionResults[id],
                       detectionErrorMessage: _detectionErrorMessages[id],
-                      isDetecting: _currentDetectingModel == id,
+                      isDetecting: _detectingModels.contains(id),
                       isPending: _pendingModels.contains(id),
                     ),
                   ),
@@ -1347,6 +1349,43 @@ class _ProviderDetailPageState extends State<ProviderDetailPage> {
                           ),
                         );
                       },
+                    ),
+                    const SizedBox(width: 10),
+                    Tooltip(
+                      message: l10n.providerDetailPageUseConcurrentLabel,
+                      child: _TactileRow(
+                        pressedScale: 0.97,
+                        haptics: false,
+                        onTap: () => setState(
+                          () => _detectUseConcurrent = !_detectUseConcurrent,
+                        ),
+                        builder: (pressed) {
+                          return AnimatedContainer(
+                            duration: const Duration(milliseconds: 180),
+                            curve: Curves.easeOutCubic,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 14,
+                              vertical: 9,
+                            ),
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(999),
+                              border: Border.all(
+                                color: cs.onSurface.withValues(alpha: 0.2),
+                              ),
+                              color: pressed
+                                  ? cs.onSurface.withValues(alpha: 0.06)
+                                  : (_detectUseConcurrent
+                                        ? cs.onSurface.withValues(alpha: 0.08)
+                                        : Colors.transparent),
+                            ),
+                            child: Icon(
+                              Lucide.Layers,
+                              size: 18,
+                              color: cs.onSurface,
+                            ),
+                          );
+                        },
+                      ),
                     ),
                     const SizedBox(width: 10),
                     _TactileRow(
@@ -2108,6 +2147,8 @@ class _ProviderDetailPageState extends State<ProviderDetailPage> {
       _selectedModels.clear();
       _detectionResults.clear();
       _detectionErrorMessages.clear();
+      _detectingModels.clear();
+      _pendingModels.clear();
     });
   }
 
@@ -2117,6 +2158,8 @@ class _ProviderDetailPageState extends State<ProviderDetailPage> {
       _selectedModels.clear();
       _detectionResults.clear();
       _detectionErrorMessages.clear();
+      _detectingModels.clear();
+      _pendingModels.clear();
     });
   }
 
@@ -2134,7 +2177,7 @@ class _ProviderDetailPageState extends State<ProviderDetailPage> {
   Future<void> _startDetection() async {
     if (_selectedModels.isEmpty || _isDetecting) return;
 
-    final modelsToTest = Set<String>.from(_selectedModels);
+    final modelsToTest = List<String>.from(_selectedModels);
 
     setState(() {
       _isDetecting = true;
@@ -2142,9 +2185,9 @@ class _ProviderDetailPageState extends State<ProviderDetailPage> {
       _detectionErrorMessages.clear();
       _isSelectionMode = false;
       _selectedModels.clear();
+      _detectingModels.clear();
       _pendingModels.clear();
       _pendingModels.addAll(modelsToTest);
-      _currentDetectingModel = null;
     });
 
     final cfg = context.read<SettingsProvider>().getProviderConfig(
@@ -2152,41 +2195,43 @@ class _ProviderDetailPageState extends State<ProviderDetailPage> {
       defaultName: widget.displayName,
     );
 
-    // 顺序检测,防止并发导致API被封锁
-    for (final modelId in modelsToTest) {
-      if (mounted) {
+    await ProviderModelBatchTestRunner.run(
+      modelIds: modelsToTest,
+      useConcurrent: _detectUseConcurrent,
+      tester: (modelId) => ProviderManager.testConnection(
+        cfg,
+        modelId,
+        useStream: _detectUseStream,
+      ),
+      onModelStarted: (modelId) {
+        if (!mounted) return;
         setState(() {
-          _currentDetectingModel = modelId;
           _pendingModels.remove(modelId);
+          _detectingModels.add(modelId);
         });
-      }
-
-      try {
-        await ProviderManager.testConnection(
-          cfg,
-          modelId,
-          useStream: _detectUseStream,
-        );
-        if (mounted) {
-          setState(() {
-            _detectionResults[modelId] = true;
-          });
-        }
-      } catch (e) {
-        if (mounted) {
-          setState(() {
-            _detectionResults[modelId] = false;
-            _detectionErrorMessages[modelId] = e.toString();
-          });
-        }
-      }
-      await Future.delayed(const Duration(milliseconds: 500));
-    }
+      },
+      onModelSucceeded: (modelId) {
+        if (!mounted) return;
+        setState(() {
+          _detectingModels.remove(modelId);
+          _detectionResults[modelId] = true;
+          _detectionErrorMessages.remove(modelId);
+        });
+      },
+      onModelFailed: (modelId, error) {
+        if (!mounted) return;
+        setState(() {
+          _detectingModels.remove(modelId);
+          _detectionResults[modelId] = false;
+          _detectionErrorMessages[modelId] = error.toString();
+        });
+      },
+    );
 
     if (mounted) {
       setState(() {
         _isDetecting = false;
-        _currentDetectingModel = null;
+        _detectingModels.clear();
         _pendingModels.clear();
       });
     }
@@ -2230,8 +2275,8 @@ class _ProviderDetailPageState extends State<ProviderDetailPage> {
       _selectedModels.clear();
       _detectionResults.clear();
       _detectionErrorMessages.clear();
+      _detectingModels.clear();
       _pendingModels.clear();
-      _currentDetectingModel = null;
       _isSelectionMode = false;
     });
   }

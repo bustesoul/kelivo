@@ -5042,6 +5042,12 @@ abstract class AppLocalizations {
   /// **'Use Streaming'**
   String get providerDetailPageUseStreamingLabel;
 
+  /// No description provided for @providerDetailPageUseConcurrentLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Use Concurrent'**
+  String get providerDetailPageUseConcurrentLabel;
+
   /// No description provided for @providerDetailPageTestingMessage.
   ///
   /// In en, this message translates to:

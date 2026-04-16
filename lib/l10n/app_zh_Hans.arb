@@ -880,6 +880,7 @@
   "providerDetailPageSelectModelButton": "选择模型",
   "providerDetailPageChangeButton": "更换",
   "providerDetailPageUseStreamingLabel": "使用流式",
+  "providerDetailPageUseConcurrentLabel": "使用并发",
   "providerDetailPageTestingMessage": "正在测试…",
   "providerDetailPageTestSuccessMessage": "测试成功",
   "providersPageTitle": "供应商",

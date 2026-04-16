@@ -1167,6 +1167,7 @@
   "providerDetailPageSelectModelButton": "Select Model",
   "providerDetailPageChangeButton": "Change",
   "providerDetailPageUseStreamingLabel": "Use Streaming",
+  "providerDetailPageUseConcurrentLabel": "Use Concurrent",
   "providerDetailPageTestingMessage": "Testing…",
   "providerDetailPageTestSuccessMessage": "Success",
   "providersPageTitle": "Providers",

@@ -57,6 +57,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:pretty_qr_code/pretty_qr_code.dart';
 import 'package:super_clipboard/super_clipboard.dart';
 import '../features/provider/widgets/provider_avatar.dart';
+import '../features/provider/utils/provider_model_batch_test_runner.dart';
 import '../features/provider/widgets/share_provider_sheet.dart'
     show encodeProviderConfig;
 import '../utils/clipboard_images.dart';
