@@ -30,7 +30,7 @@ import 'multi_key_manager_page.dart';
 import 'provider_balance_page.dart';
 import 'provider_network_page.dart';
 import '../../../core/services/haptics.dart';
-import '../../provider/widgets/provider_balance_badge.dart';
+import '../utils/provider_model_batch_test_runner.dart';
 import '../../provider/widgets/provider_avatar.dart';
 import '../../../utils/model_grouping.dart';
 import '../../../theme/app_font_weights.dart';
@@ -72,9 +72,10 @@ class _ProviderDetailPageState extends State<ProviderDetailPage> {
   final Set<String> _selectedModels = {};
   bool _isDetecting = false;
   bool _detectUseStream = false;
+  bool _detectUseConcurrent = true;
   final Map<String, bool> _detectionResults = {};
   final Map<String, String> _detectionErrorMessages = {};
-  String? _currentDetectingModel;
+  final Set<String> _detectingModels = {};
   final Set<String> _pendingModels = {};
   bool _aihubmixAppCodeEnabled = false;
   bool _claudePromptCachingEnabled = false;
@@ -1549,7 +1550,7 @@ class _ProviderDetailPageState extends State<ProviderDetailPage> {
                       },
                       detectionResult: _detectionResults[id],
                       detectionErrorMessage: _detectionErrorMessages[id],
-                      isDetecting: _currentDetectingModel == id,
+                      isDetecting: _detectingModels.contains(id),
                       isPending: _pendingModels.contains(id),
                     ),
                   ),
@@ -1562,11 +1563,213 @@ class _ProviderDetailPageState extends State<ProviderDetailPage> {
             left: 0,
             right: 0,
             bottom: 12 + MediaQuery.of(context).padding.bottom,
-            child: _buildModelSelectionToolbar(
-              l10n: l10n,
-              cs: cs,
-              allSelected: allSelected,
-              hasFailedDetectedModels: hasFailedDetectedModels,
+            child: Center(
+              child: Container(
+                decoration: BoxDecoration(
+                  color: Theme.of(context).brightness == Brightness.dark
+                      ? Color.alphaBlend(
+                          Colors.white.withValues(alpha: 0.12),
+                          cs.surface,
+                        )
+                      : const Color(0xFFF2F3F5),
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 10,
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _TactileRow(
+                      pressedScale: 0.97,
+                      haptics: false,
+                      onTap: () {
+                        if (allSelected) {
+                          setState(() {
+                            _selectedModels.clear();
+                          });
+                        } else {
+                          _selectAll();
+                        }
+                      },
+                      builder: (pressed) {
+                        final icon = allSelected
+                            ? Lucide.Square
+                            : Lucide.CheckSquare;
+                        final label = allSelected
+                            ? l10n.mcpAssistantSheetClearAll
+                            : l10n.mcpAssistantSheetSelectAll;
+                        return Container(
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(999),
+                            border: Border.all(
+                              color: cs.onSurface.withValues(alpha: 0.2),
+                            ),
+                            color: pressed
+                                ? cs.onSurface.withValues(alpha: 0.06)
+                                : null,
+                          ),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 18,
+                            vertical: 10,
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              AnimatedSwitcher(
+                                duration: const Duration(milliseconds: 160),
+                                transitionBuilder: (child, anim) =>
+                                    ScaleTransition(scale: anim, child: child),
+                                child: Icon(
+                                  icon,
+                                  key: ValueKey(allSelected),
+                                  size: 20,
+                                  color: cs.onSurface,
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                label,
+                                style: TextStyle(
+                                  color: cs.onSurface,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+                    const SizedBox(width: 10),
+                    _TactileRow(
+                      pressedScale: 0.97,
+                      haptics: false,
+                      onTap: () =>
+                          setState(() => _detectUseStream = !_detectUseStream),
+                      builder: (pressed) {
+                        return AnimatedContainer(
+                          duration: const Duration(milliseconds: 180),
+                          curve: Curves.easeOutCubic,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 14,
+                            vertical: 9,
+                          ),
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(999),
+                            border: Border.all(
+                              color: cs.onSurface.withValues(alpha: 0.2),
+                            ),
+                            color: pressed
+                                ? cs.onSurface.withValues(alpha: 0.06)
+                                : (_detectUseStream
+                                      ? cs.onSurface.withValues(alpha: 0.08)
+                                      : Colors.transparent),
+                          ),
+                          child: AnimatedSwitcher(
+                            duration: const Duration(milliseconds: 160),
+                            transitionBuilder: (child, anim) =>
+                                ScaleTransition(scale: anim, child: child),
+                            child: Icon(
+                              _detectUseStream
+                                  ? Lucide.AudioWaveform
+                                  : Lucide.SquareEqual,
+                              key: ValueKey(_detectUseStream),
+                              size: 18,
+                              color: cs.onSurface,
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                    const SizedBox(width: 10),
+                    Tooltip(
+                      message: l10n.providerDetailPageUseConcurrentLabel,
+                      child: _TactileRow(
+                        pressedScale: 0.97,
+                        haptics: false,
+                        onTap: () => setState(
+                          () => _detectUseConcurrent = !_detectUseConcurrent,
+                        ),
+                        builder: (pressed) {
+                          return AnimatedContainer(
+                            duration: const Duration(milliseconds: 180),
+                            curve: Curves.easeOutCubic,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 14,
+                              vertical: 9,
+                            ),
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(999),
+                              border: Border.all(
+                                color: cs.onSurface.withValues(alpha: 0.2),
+                              ),
+                              color: pressed
+                                  ? cs.onSurface.withValues(alpha: 0.06)
+                                  : (_detectUseConcurrent
+                                        ? cs.onSurface.withValues(alpha: 0.08)
+                                        : Colors.transparent),
+                            ),
+                            child: Icon(
+                              Lucide.Layers,
+                              size: 18,
+                              color: cs.onSurface,
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    _TactileRow(
+                      pressedScale: 0.97,
+                      haptics: false,
+                      onTap: _selectedModels.isEmpty ? null : _startDetection,
+                      builder: (pressed) {
+                        return Container(
+                          decoration: BoxDecoration(
+                            color: _selectedModels.isEmpty
+                                ? cs.onSurface.withValues(alpha: 0.1)
+                                : cs.primary.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(999),
+                          ),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 18,
+                            vertical: 10,
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                _isDetecting
+                                    ? Lucide.Loader
+                                    : Lucide.HeartPulse,
+                                size: 20,
+                                color: _selectedModels.isEmpty
+                                    ? cs.onSurface.withValues(alpha: 0.5)
+                                    : cs.primary,
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                _isDetecting
+                                    ? l10n.providerDetailPageBatchDetecting
+                                    : l10n.providerDetailPageBatchDetectButton,
+                                style: TextStyle(
+                                  color: _selectedModels.isEmpty
+                                      ? cs.onSurface.withValues(alpha: 0.5)
+                                      : cs.primary,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+                  ],
+                ),
+              ),
             ),
           )
         else
@@ -2913,6 +3116,10 @@ class _ProviderDetailPageState extends State<ProviderDetailPage> {
     setState(() {
       _isSelectionMode = true;
       _selectedModels.clear();
+      _detectionResults.clear();
+      _detectionErrorMessages.clear();
+      _detectingModels.clear();
+      _pendingModels.clear();
     });
   }
 
@@ -2920,6 +3127,10 @@ class _ProviderDetailPageState extends State<ProviderDetailPage> {
     setState(() {
       _isSelectionMode = false;
       _selectedModels.clear();
+      _detectionResults.clear();
+      _detectionErrorMessages.clear();
+      _detectingModels.clear();
+      _pendingModels.clear();
     });
   }
 
@@ -3065,15 +3276,17 @@ class _ProviderDetailPageState extends State<ProviderDetailPage> {
   Future<void> _startDetection() async {
     if (_selectedModels.isEmpty || _isDetecting) return;
 
-    final modelsToTest = Set<String>.from(_selectedModels);
+    final modelsToTest = List<String>.from(_selectedModels);
 
     setState(() {
       _isDetecting = true;
-      _detectionResults.removeWhere((id, _) => modelsToTest.contains(id));
-      _detectionErrorMessages.removeWhere((id, _) => modelsToTest.contains(id));
+      _detectionResults.clear();
+      _detectionErrorMessages.clear();
+      _isSelectionMode = false;
+      _selectedModels.clear();
+      _detectingModels.clear();
       _pendingModels.clear();
       _pendingModels.addAll(modelsToTest);
-      _currentDetectingModel = null;
     });
 
     final cfg = context.read<SettingsProvider>().getProviderConfig(
@@ -3081,42 +3294,43 @@ class _ProviderDetailPageState extends State<ProviderDetailPage> {
       defaultName: widget.displayName,
     );
 
-    // 顺序检测,防止并发导致API被封锁
-    for (final modelId in modelsToTest) {
-      if (mounted) {
+    await ProviderModelBatchTestRunner.run(
+      modelIds: modelsToTest,
+      useConcurrent: _detectUseConcurrent,
+      tester: (modelId) => ProviderManager.testConnection(
+        cfg,
+        modelId,
+        useStream: _detectUseStream,
+      ),
+      onModelStarted: (modelId) {
+        if (!mounted) return;
         setState(() {
-          _currentDetectingModel = modelId;
           _pendingModels.remove(modelId);
+          _detectingModels.add(modelId);
         });
-      }
-
-      try {
-        await ProviderManager.testConnection(
-          cfg,
-          modelId,
-          useStream: _detectUseStream,
-        );
-        if (mounted) {
-          setState(() {
-            _detectionResults[modelId] = true;
-            _detectionErrorMessages.remove(modelId);
-          });
-        }
-      } catch (e) {
-        if (mounted) {
-          setState(() {
-            _detectionResults[modelId] = false;
-            _detectionErrorMessages[modelId] = e.toString();
-          });
-        }
-      }
-      await Future.delayed(const Duration(milliseconds: 500));
-    }
+      },
+      onModelSucceeded: (modelId) {
+        if (!mounted) return;
+        setState(() {
+          _detectingModels.remove(modelId);
+          _detectionResults[modelId] = true;
+          _detectionErrorMessages.remove(modelId);
+        });
+      },
+      onModelFailed: (modelId, error) {
+        if (!mounted) return;
+        setState(() {
+          _detectingModels.remove(modelId);
+          _detectionResults[modelId] = false;
+          _detectionErrorMessages[modelId] = error.toString();
+        });
+      },
+    );
 
     if (mounted) {
       setState(() {
         _isDetecting = false;
-        _currentDetectingModel = null;
+        _detectingModels.clear();
         _pendingModels.clear();
       });
     }
@@ -3163,8 +3377,8 @@ class _ProviderDetailPageState extends State<ProviderDetailPage> {
       _selectedModels.clear();
       _detectionResults.clear();
       _detectionErrorMessages.clear();
+      _detectingModels.clear();
       _pendingModels.clear();
-      _currentDetectingModel = null;
       _isSelectionMode = false;
     });
   }

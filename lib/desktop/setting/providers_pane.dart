@@ -932,9 +932,10 @@ class _DesktopProviderDetailPaneState
   final Set<String> _selectedModels = {};
   bool _isDetecting = false;
   bool _detectUseStream = false;
+  bool _detectUseConcurrent = true;
   final Map<String, bool> _detectionResults = {};
   final Map<String, String> _detectionErrorMessages = {};
-  String? _currentDetectingModel;
+  final Set<String> _detectingModels = {};
   final Set<String> _pendingModels = {};
   int _providerScopedStateEpoch = 0;
 
@@ -1993,6 +1994,31 @@ class _DesktopProviderDetailPaneState
                     ),
                     const SizedBox(width: 6),
                     Tooltip(
+                      message: l10n.providerDetailPageUseConcurrentLabel,
+                      child: GestureDetector(
+                        onTap: () => setState(
+                          () => _detectUseConcurrent = !_detectUseConcurrent,
+                        ),
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 180),
+                          curve: Curves.easeOutCubic,
+                          padding: const EdgeInsets.all(6),
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(8),
+                            color: _detectUseConcurrent
+                                ? cs.onSurface.withValues(alpha: 0.08)
+                                : Colors.transparent,
+                          ),
+                          child: Icon(
+                            lucide.Lucide.Layers,
+                            size: 18,
+                            color: cs.onSurface.withValues(alpha: 0.85),
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Tooltip(
                       message: _isDetecting
                           ? l10n.providerDetailPageBatchDetecting
                           : l10n.providerDetailPageBatchDetectStart,
@@ -2113,7 +2139,7 @@ class _DesktopProviderDetailPaneState
                     },
                     detectionResults: _detectionResults,
                     detectionErrorMessages: _detectionErrorMessages,
-                    currentDetectingModel: _currentDetectingModel,
+                    detectingModels: _detectingModels,
                     pendingModels: _pendingModels,
                   ),
                 ),
@@ -4699,6 +4725,10 @@ class _DesktopProviderDetailPaneState
     setState(() {
       _isSelectionMode = true;
       _selectedModels.clear();
+      _detectionResults.clear();
+      _detectionErrorMessages.clear();
+      _detectingModels.clear();
+      _pendingModels.clear();
     });
   }
 
@@ -4706,6 +4736,10 @@ class _DesktopProviderDetailPaneState
     setState(() {
       _isSelectionMode = false;
       _selectedModels.clear();
+      _detectionResults.clear();
+      _detectionErrorMessages.clear();
+      _detectingModels.clear();
+      _pendingModels.clear();
     });
   }
 
@@ -4986,8 +5020,8 @@ class _DesktopProviderDetailPaneState
       _selectedModels.clear();
       _detectionResults.clear();
       _detectionErrorMessages.clear();
+      _detectingModels.clear();
       _pendingModels.clear();
-      _currentDetectingModel = null;
       _isSelectionMode = false;
     });
   }
@@ -4995,16 +5029,17 @@ class _DesktopProviderDetailPaneState
   Future<void> _startDetection() async {
     if (_selectedModels.isEmpty || _isDetecting) return;
 
-    final modelsToTest = Set<String>.from(_selectedModels);
-    final detectionEpoch = _providerScopedStateEpoch;
+    final modelsToTest = List<String>.from(_selectedModels);
 
     setState(() {
       _isDetecting = true;
-      _detectionResults.removeWhere((id, _) => modelsToTest.contains(id));
-      _detectionErrorMessages.removeWhere((id, _) => modelsToTest.contains(id));
+      _detectionResults.clear();
+      _detectionErrorMessages.clear();
+      _isSelectionMode = false;
+      _selectedModels.clear();
+      _detectingModels.clear();
       _pendingModels.clear();
       _pendingModels.addAll(modelsToTest);
-      _currentDetectingModel = null;
     });
 
     final sp = context.read<SettingsProvider>();
@@ -5013,42 +5048,43 @@ class _DesktopProviderDetailPaneState
       defaultName: widget.displayName,
     );
 
-    for (final modelId in modelsToTest) {
-      if (!mounted || detectionEpoch != _providerScopedStateEpoch) return;
-      if (mounted) {
+    await ProviderModelBatchTestRunner.run(
+      modelIds: modelsToTest,
+      useConcurrent: _detectUseConcurrent,
+      tester: (modelId) => ProviderManager.testConnection(
+        cfg,
+        modelId,
+        useStream: _detectUseStream,
+      ),
+      onModelStarted: (modelId) {
+        if (!mounted) return;
         setState(() {
-          _currentDetectingModel = modelId;
           _pendingModels.remove(modelId);
+          _detectingModels.add(modelId);
         });
-      }
-
-      try {
-        await ProviderManager.testConnection(
-          cfg,
-          modelId,
-          useStream: _detectUseStream,
-        );
-        if (mounted && detectionEpoch == _providerScopedStateEpoch) {
-          setState(() {
-            _detectionResults[modelId] = true;
-            _detectionErrorMessages.remove(modelId);
-          });
-        }
-      } catch (e) {
-        if (mounted && detectionEpoch == _providerScopedStateEpoch) {
-          setState(() {
-            _detectionResults[modelId] = false;
-            _detectionErrorMessages[modelId] = e.toString();
-          });
-        }
-      }
-      await Future.delayed(const Duration(milliseconds: 500));
-    }
+      },
+      onModelSucceeded: (modelId) {
+        if (!mounted) return;
+        setState(() {
+          _detectingModels.remove(modelId);
+          _detectionResults[modelId] = true;
+          _detectionErrorMessages.remove(modelId);
+        });
+      },
+      onModelFailed: (modelId, error) {
+        if (!mounted) return;
+        setState(() {
+          _detectingModels.remove(modelId);
+          _detectionResults[modelId] = false;
+          _detectionErrorMessages[modelId] = error.toString();
+        });
+      },
+    );
 
     if (mounted && detectionEpoch == _providerScopedStateEpoch) {
       setState(() {
         _isDetecting = false;
-        _currentDetectingModel = null;
+        _detectingModels.clear();
         _pendingModels.clear();
       });
     }
@@ -6618,7 +6654,7 @@ class _ModelGroupAccordion extends StatefulWidget {
     this.onSelectionChanged,
     this.detectionResults = const {},
     this.detectionErrorMessages = const {},
-    this.currentDetectingModel,
+    this.detectingModels = const {},
     this.pendingModels = const {},
   });
   final String group;
@@ -6629,7 +6665,7 @@ class _ModelGroupAccordion extends StatefulWidget {
   final Map<String, String> detectionErrorMessages;
   final ValueChanged<Set<String>>? onSelectionChanged;
   final Map<String, bool> detectionResults;
-  final String? currentDetectingModel;
+  final Set<String> detectingModels;
   final Set<String> pendingModels;
   @override
   State<_ModelGroupAccordion> createState() => _ModelGroupAccordionState();
@@ -6723,7 +6759,7 @@ class _ModelGroupAccordionState extends State<_ModelGroupAccordion> {
                       },
                       detectionErrorMessage: widget.detectionErrorMessages[id],
                       detectionResult: widget.detectionResults[id],
-                      isDetecting: widget.currentDetectingModel == id,
+                      isDetecting: widget.detectingModels.contains(id),
                       isPending: widget.pendingModels.contains(id),
                     ),
                 ],
