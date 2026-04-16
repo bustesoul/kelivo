@@ -3630,6 +3630,9 @@ class AppLocalizationsZh extends AppLocalizations {
   String get providerDetailPageUseStreamingLabel => '使用流式';
 
   @override
+  String get providerDetailPageUseConcurrentLabel => '使用并发';
+
+  @override
   String get providerDetailPageTestingMessage => '正在测试…';
 
   @override
@@ -14859,6 +14862,9 @@ class AppLocalizationsZhHans extends AppLocalizationsZh {
   String get providerDetailPageUseStreamingLabel => '使用流式';
 
   @override
+  String get providerDetailPageUseConcurrentLabel => '使用并发';
+
+  @override
   String get providerDetailPageTestingMessage => '正在测试…';
 
   @override
@@ -26012,6 +26018,9 @@ class AppLocalizationsZhHant extends AppLocalizationsZh {
 
   @override
   String get providerDetailPageUseStreamingLabel => '使用串流';
+
+  @override
+  String get providerDetailPageUseConcurrentLabel => '使用並發';
 
   @override
   String get providerDetailPageTestingMessage => '正在測試…';

@@ -3764,6 +3764,9 @@ class AppLocalizationsEn extends AppLocalizations {
   String get providerDetailPageUseStreamingLabel => 'Use Streaming';
 
   @override
+  String get providerDetailPageUseConcurrentLabel => 'Use Concurrent';
+
+  @override
   String get providerDetailPageTestingMessage => 'Testing…';
 
   @override
