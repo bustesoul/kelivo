@@ -137,5 +137,45 @@ void main() {
 
       expect(repaired, expectedStart);
     });
+
+    test('inserts space after ATX hashes when missing', () {
+      const input =
+          '###连接测试\n'
+          '正文段落\n\n'
+          '####推荐：改用 docker-compose\n'
+          '正常 ### 标题保持不变\n'
+          '#### 已有空格也保持不变';
+      const expected =
+          '### 连接测试\n'
+          '正文段落\n\n'
+          '#### 推荐：改用 docker-compose\n'
+          '正常 ### 标题保持不变\n'
+          '#### 已有空格也保持不变';
+
+      final output = MarkdownWithCodeHighlight.preprocessFencesForTesting(
+        input,
+        enableMath: false,
+        enableDollarLatex: false,
+      );
+
+      expect(output, expected);
+    });
+
+    test('does not insert space inside fenced code for ATX-like lines', () {
+      const input =
+          '```text\n'
+          '###连接测试\n'
+          '```\n';
+
+      final output = MarkdownWithCodeHighlight.preprocessFencesForTesting(
+        input,
+        enableMath: false,
+        enableDollarLatex: false,
+      );
+
+      // Fenced content must remain literal.
+      expect(output, contains('###连接测试'));
+      expect(output, isNot(contains('### 连接测试')));
+    });
   });
 }

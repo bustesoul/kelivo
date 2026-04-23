@@ -917,6 +917,15 @@ class MarkdownWithCodeHighlight extends StatelessWidget {
     );
     out = out.replaceAllMapped(atxEnum, (m) => "${m[1]}.\u200C${m[2]}${m[3]}");
 
+    // 6.1) Tolerate missing space after ATX hashes (e.g. "###连接测试").
+    // Strict CommonMark requires a space between the hashes and the heading
+    // text, but many LLMs (especially with CJK content) omit it. Insert one
+    // when 1–6 leading hashes are immediately followed by a non-space,
+    // non-hash character. Code blocks are already masked at this point, so
+    // hashes inside fenced/inline code are not affected.
+    final atxNoSpace = RegExp(r"^(\s{0,3}#{1,6})(?=[^\s#])", multiLine: true);
+    out = out.replaceAllMapped(atxNoSpace, (m) => "${m[1]} ");
+
     // 7) Normalize double-bracket citation links: [[n]](url) → [n](url)
     //    Many LLMs with built-in web search (DashScope, Perplexity, etc.) emit
     //    citations as [[1]](url), where the inner [1] is the display text. The
