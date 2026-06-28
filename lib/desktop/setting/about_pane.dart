@@ -1,6 +1,7 @@
-import 'dart:io';
+﻿import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -163,11 +164,36 @@ class _DesktopAboutPaneState extends State<DesktopAboutPane> {
                   ),
                   const _DeskRowDivider(),
                   _DeskNavRow(
+                    icon: lucide.Lucide.Earth,
+                    label: l10n.aboutPageWebsite,
+                    onTap: () => _openUrl('https://kelivo.psycheas.top/'),
+                  ),
+                  const _DeskRowDivider(),
+                  _DeskNavRowSvg(
+                    svgAsset: 'assets/icons/github.svg',
+                    label: l10n.aboutPageGithub,
+                    onTap: () =>
+                        _openUrl('https://github.com/bustezero/kelivo'),
+                  ),
+                  const _DeskRowDivider(),
+                  _DeskNavRow(
                     icon: lucide.Lucide.FileText,
                     label: l10n.aboutPageLicense,
                     onTap: () => _openUrl(
                       'https://github.com/bustezero/kelivo/blob/master/LICENSE',
                     ),
+                  ),
+                  const _DeskRowDivider(),
+                  _DeskNavRowSvg(
+                    svgAsset: 'assets/icons/tencent-qq.svg',
+                    label: l10n.aboutPageJoinQQGroup,
+                    onTap: () => showQQGroupJoinSheet(context: context),
+                  ),
+                  const _DeskRowDivider(),
+                  _DeskNavRowSvg(
+                    svgAsset: 'assets/icons/discord.svg',
+                    label: l10n.aboutPageJoinDiscord,
+                    onTap: () => _openUrl('https://discord.gg/Tb8DyvvV5T'),
                   ),
                 ],
               ),
@@ -464,3 +490,79 @@ class _DeskNavRowState extends State<_DeskNavRow> {
     );
   }
 }
+
+class _DeskNavRowSvg extends StatefulWidget {
+  const _DeskNavRowSvg({
+    required this.svgAsset,
+    required this.label,
+    required this.onTap,
+  });
+  final String svgAsset;
+  final String label;
+  final VoidCallback onTap;
+  @override
+  State<_DeskNavRowSvg> createState() => _DeskNavRowSvgState();
+}
+
+class _DeskNavRowSvgState extends State<_DeskNavRowSvg> {
+  bool _hover = false;
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final hoverBg = isDark
+        ? Colors.white.withValues(alpha: 0.06)
+        : Colors.black.withValues(alpha: 0.05);
+    final bg = _hover ? hoverBg : Colors.transparent;
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 160),
+          curve: Curves.easeOutCubic,
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+          decoration: BoxDecoration(
+            color: bg,
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Row(
+            children: [
+              SizedBox(
+                width: 26,
+                child: SvgPicture.asset(
+                  widget.svgAsset,
+                  colorFilter: ColorFilter.mode(
+                    cs.onSurface.withValues(alpha: 0.92),
+                    BlendMode.srcIn,
+                  ),
+                  width: 18,
+                  height: 18,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  widget.label,
+                  style: TextStyle(
+                    fontSize: 14.5,
+                    color: cs.onSurface.withValues(alpha: 0.92),
+                  ),
+                ),
+              ),
+              Icon(
+                lucide.Lucide.ChevronRight,
+                size: 16,
+                color: cs.onSurface.withValues(alpha: 0.6),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+

@@ -201,6 +201,7 @@ class _DesktopProvidersBodyState extends State<_DesktopProvidersBody> {
     required ({String name, String key}) item,
     required SettingsProvider settings,
     required List<({String name, String key})> ordered,
+    required Set<String> baseKeys,
     required ColorScheme colorScheme,
   }) {
     final cfg = settings.getProviderConfig(item.key, defaultName: item.name);
@@ -232,46 +233,46 @@ class _DesktopProvidersBodyState extends State<_DesktopProvidersBody> {
         });
       },
       onDelete: () async {
-        final l10n = AppLocalizations.of(context)!;
-        final ap = context.read<AssistantProvider>();
-        final ok = await showDialog<bool>(
-          context: context,
-          builder: (ctx) => AlertDialog(
-            title: Text(l10n.providerDetailPageDeleteProviderTitle),
-            content: Text(l10n.providerDetailPageDeleteProviderContent),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(ctx).pop(false),
-                child: Text(l10n.providerDetailPageCancelButton),
-              ),
-              TextButton(
-                onPressed: () => Navigator.of(ctx).pop(true),
-                child: Text(
-                  l10n.providerDetailPageDeleteButton,
-                  style: const TextStyle(color: Colors.red),
+              final l10n = AppLocalizations.of(context)!;
+              final ap = context.read<AssistantProvider>();
+              final ok = await showDialog<bool>(
+                context: context,
+                builder: (ctx) => AlertDialog(
+                  title: Text(l10n.providerDetailPageDeleteProviderTitle),
+                  content: Text(l10n.providerDetailPageDeleteProviderContent),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.of(ctx).pop(false),
+                      child: Text(l10n.providerDetailPageCancelButton),
+                    ),
+                    TextButton(
+                      onPressed: () => Navigator.of(ctx).pop(true),
+                      child: Text(
+                        l10n.providerDetailPageDeleteButton,
+                        style: TextStyle(color: Colors.red),
+                      ),
+                    ),
+                  ],
                 ),
-              ),
-            ],
-          ),
-        );
-        if (ok != true) return;
-        try {
-          for (final assistant in ap.assistants) {
-            if (assistant.chatModelProvider == item.key) {
-              await ap.updateAssistant(
-                assistant.copyWith(clearChatModel: true),
               );
-            }
-          }
-        } catch (_) {}
-        await settings.removeProviderConfig(item.key);
-        if (!mounted) return;
-        setState(() {
-          if (_selectedKey == item.key) {
-            _selectedKey = ordered.isNotEmpty ? ordered.first.key : null;
-          }
-        });
-      },
+              if (ok != true) return;
+              try {
+                for (final assistant in ap.assistants) {
+                  if (assistant.chatModelProvider == item.key) {
+                    await ap.updateAssistant(
+                      assistant.copyWith(clearChatModel: true),
+                    );
+                  }
+                }
+              } catch (_) {}
+              await settings.removeProviderConfig(item.key);
+              if (!mounted) return;
+              setState(() {
+                if (_selectedKey == item.key) {
+                  _selectedKey = ordered.isNotEmpty ? ordered.first.key : null;
+                }
+              });
+            },
     );
   }
 
@@ -298,11 +299,8 @@ class _DesktopProvidersBodyState extends State<_DesktopProvidersBody> {
       (name: l10n.providersPageByteDanceName, key: 'ByteDance'),
     ];
 
-    final baseItems = base()
-        .where((p) => !settings.isBuiltInProviderRemoved(p.key))
-        .toList();
     final cfgs = settings.providerConfigs;
-    final baseKeys = {for (final p in baseItems) p.key};
+    final baseKeys = {for (final p in base()) p.key};
     final dynamicItems = <({String name, String key})>[];
     cfgs.forEach((key, cfg) {
       if (!baseKeys.contains(key)) {
@@ -313,7 +311,7 @@ class _DesktopProvidersBodyState extends State<_DesktopProvidersBody> {
       }
     });
     // Apply saved order
-    final merged = <({String name, String key})>[...baseItems, ...dynamicItems];
+    final merged = <({String name, String key})>[...base(), ...dynamicItems];
     final order = settings.providersOrder;
     final map = {for (final p in merged) p.key: p};
     final ordered = <({String name, String key})>[];
@@ -606,6 +604,7 @@ class _DesktopProvidersBodyState extends State<_DesktopProvidersBody> {
                                                       item: row.item,
                                                       settings: settings,
                                                       ordered: ordered,
+                                                      baseKeys: baseKeys,
                                                       colorScheme: cs,
                                                     )
                                                   : ReorderableDragStartListener(
@@ -615,6 +614,7 @@ class _DesktopProvidersBodyState extends State<_DesktopProvidersBody> {
                                                             item: row.item,
                                                             settings: settings,
                                                             ordered: ordered,
+                                                            baseKeys: baseKeys,
                                                             colorScheme: cs,
                                                           ),
                                                     ),
@@ -657,6 +657,7 @@ class _DesktopProvidersBodyState extends State<_DesktopProvidersBody> {
                                   item: item,
                                   settings: settings,
                                   ordered: ordered,
+                                  baseKeys: baseKeys,
                                   colorScheme: cs,
                                 );
                                 return KeyedSubtree(
@@ -1016,7 +1017,7 @@ class _DesktopProviderDetailPaneState
     _detectionResults.clear();
     _detectionErrorMessages.clear();
     _pendingModels.clear();
-    _currentDetectingModel = null;
+    _detectingModels.clear();
     _isSelectionMode = false;
   }
 
@@ -4725,10 +4726,6 @@ class _DesktopProviderDetailPaneState
     setState(() {
       _isSelectionMode = true;
       _selectedModels.clear();
-      _detectionResults.clear();
-      _detectionErrorMessages.clear();
-      _detectingModels.clear();
-      _pendingModels.clear();
     });
   }
 
@@ -4736,10 +4733,6 @@ class _DesktopProviderDetailPaneState
     setState(() {
       _isSelectionMode = false;
       _selectedModels.clear();
-      _detectionResults.clear();
-      _detectionErrorMessages.clear();
-      _detectingModels.clear();
-      _pendingModels.clear();
     });
   }
 
@@ -4908,10 +4901,7 @@ class _DesktopProviderDetailPaneState
         (id, _) => modelsToDelete.contains(id),
       );
       _pendingModels.removeAll(modelsToDelete);
-      if (_currentDetectingModel != null &&
-          modelsToDelete.contains(_currentDetectingModel)) {
-        _currentDetectingModel = null;
-      }
+      _detectingModels.removeAll(modelsToDelete);
       _isSelectionMode = false;
     });
     if (deletedCount > 0) {
@@ -5020,8 +5010,8 @@ class _DesktopProviderDetailPaneState
       _selectedModels.clear();
       _detectionResults.clear();
       _detectionErrorMessages.clear();
-      _detectingModels.clear();
       _pendingModels.clear();
+      _detectingModels.clear();
       _isSelectionMode = false;
     });
   }
@@ -5029,17 +5019,16 @@ class _DesktopProviderDetailPaneState
   Future<void> _startDetection() async {
     if (_selectedModels.isEmpty || _isDetecting) return;
 
-    final modelsToTest = List<String>.from(_selectedModels);
+    final modelsToTest = Set<String>.from(_selectedModels);
+    final detectionEpoch = _providerScopedStateEpoch;
 
     setState(() {
       _isDetecting = true;
-      _detectionResults.clear();
-      _detectionErrorMessages.clear();
-      _isSelectionMode = false;
-      _selectedModels.clear();
-      _detectingModels.clear();
+      _detectionResults.removeWhere((id, _) => modelsToTest.contains(id));
+      _detectionErrorMessages.removeWhere((id, _) => modelsToTest.contains(id));
       _pendingModels.clear();
       _pendingModels.addAll(modelsToTest);
+      _detectingModels.clear();
     });
 
     final sp = context.read<SettingsProvider>();
@@ -5057,14 +5046,14 @@ class _DesktopProviderDetailPaneState
         useStream: _detectUseStream,
       ),
       onModelStarted: (modelId) {
-        if (!mounted) return;
+        if (!mounted || detectionEpoch != _providerScopedStateEpoch) return;
         setState(() {
           _pendingModels.remove(modelId);
           _detectingModels.add(modelId);
         });
       },
       onModelSucceeded: (modelId) {
-        if (!mounted) return;
+        if (!mounted || detectionEpoch != _providerScopedStateEpoch) return;
         setState(() {
           _detectingModels.remove(modelId);
           _detectionResults[modelId] = true;
@@ -5072,7 +5061,7 @@ class _DesktopProviderDetailPaneState
         });
       },
       onModelFailed: (modelId, error) {
-        if (!mounted) return;
+        if (!mounted || detectionEpoch != _providerScopedStateEpoch) return;
         setState(() {
           _detectingModels.remove(modelId);
           _detectionResults[modelId] = false;
@@ -6654,7 +6643,7 @@ class _ModelGroupAccordion extends StatefulWidget {
     this.onSelectionChanged,
     this.detectionResults = const {},
     this.detectionErrorMessages = const {},
-    this.detectingModels = const {},
+    required this.detectingModels,
     this.pendingModels = const {},
   });
   final String group;
@@ -7014,3 +7003,4 @@ class _CardPressState extends State<_CardPress> {
 // Removed embedded default model card; now in setting/default_model_pane.dart
 
 // ===== Display Settings Body =====
+

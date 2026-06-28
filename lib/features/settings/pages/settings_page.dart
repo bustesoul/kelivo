@@ -20,6 +20,7 @@ import 'network_proxy_page.dart';
 import 'storage_space_page.dart';
 import '../../stats/pages/stats_page.dart';
 import '../../../core/services/storage/storage_usage_service.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../../../core/services/haptics.dart';
 import 'package:Kelivo/theme/app_font_weights.dart';
 
@@ -146,7 +147,7 @@ class SettingsPage extends StatelessWidget {
               ),
             ),
 
-          // 通用设置：使用iOS风格分组卡片，黑色（中性）图标与标题，无描述
+          // 閫氱敤璁剧疆锛氫娇鐢╥OS椋庢牸鍒嗙粍鍗＄墖锛岄粦鑹诧紙涓€э級鍥炬爣涓庢爣棰橈紝鏃犳弿杩?
           header(l10n.settingsPageGeneralSection, first: true),
           _iosSectionCard(
             children: [
@@ -336,6 +337,29 @@ class SettingsPage extends StatelessWidget {
                   Navigator.of(
                     context,
                   ).push(MaterialPageRoute(builder: (_) => const AboutPage()));
+                },
+              ),
+              _iosDivider(context),
+              _iosNavRow(
+                context,
+                icon: Lucide.ChartColumnBig,
+                label: l10n.settingsPageStatistics,
+                onTap: () {
+                  Navigator.of(
+                    context,
+                  ).push(MaterialPageRoute(builder: (_) => const StatsPage()));
+                },
+              ),
+              _iosDivider(context),
+              _iosNavRow(
+                context,
+                icon: Lucide.Library,
+                label: l10n.settingsPageDocs,
+                onTap: () async {
+                  final uri = Uri.parse('https://kelivo.psycheas.top/');
+                  if (!await launchUrl(uri, mode: LaunchMode.platformDefault)) {
+                    await launchUrl(uri, mode: LaunchMode.externalApplication);
+                  }
                 },
               ),
               if (settings.requestLogEnabled || settings.flutterLogEnabled) ...[

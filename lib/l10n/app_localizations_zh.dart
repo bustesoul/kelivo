@@ -304,6 +304,117 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settingsPageShare => '分享';
 
   @override
+  String get statsPageTitle => '统计';
+
+  @override
+  String get statsPageRangeAllTime => '全部';
+
+  @override
+  String get statsPageRangeLast30Days => '最近 30 天';
+
+  @override
+  String get statsPageRangePreviousMonth => '上个月';
+
+  @override
+  String get statsPageRangePreviousQuarter => '上个季度';
+
+  @override
+  String get statsPageRangeCustom => '自定义';
+
+  @override
+  String get statsPageHeatmapTitle => '聊天热力图';
+
+  @override
+  String get statsPageHeatmapLess => '少';
+
+  @override
+  String get statsPageHeatmapMore => '多';
+
+  @override
+  String get statsPageSummaryTitle => '总览';
+
+  @override
+  String get statsPageTotalConversations => '总对话数';
+
+  @override
+  String get statsPageTotalMessages => '总消息数';
+
+  @override
+  String get statsPageInputTokens => '输入 Tokens';
+
+  @override
+  String get statsPageOutputTokens => '输出 Tokens';
+
+  @override
+  String get statsPageCachedTokens => '缓存 Tokens';
+
+  @override
+  String get statsPageLaunchCount => '应用启动次数';
+
+  @override
+  String get statsPageUsageTrendTitle => '用量趋势';
+
+  @override
+  String get statsPageModelUsageTitle => '模型使用率';
+
+  @override
+  String get statsPageAssistantUsageTitle => '助手使用率';
+
+  @override
+  String get statsPageTopicVolumeTitle => '话题内容量';
+
+  @override
+  String get statsPageModelColumn => '模型';
+
+  @override
+  String get statsPageAssistantColumn => '助手';
+
+  @override
+  String get statsPageTopicColumn => '话题';
+
+  @override
+  String get statsPageMessagesColumn => '消息数';
+
+  @override
+  String get statsPageTopicsColumn => '话题数';
+
+  @override
+  String get statsPageEmptyTitle => '暂无统计数据';
+
+  @override
+  String get statsPageShowAllTooltip => '查看全部';
+
+  @override
+  String get statsPageClose => '关闭';
+
+  @override
+  String get statsPageUnknownProvider => '未知供应商';
+
+  @override
+  String get statsPageUnknownAssistant => '默认助手';
+
+  @override
+  String get statsPageUnknownModel => '未知模型';
+
+  @override
+  String get statsPageUnknownTopic => '未命名话题';
+
+  @override
+  String get statsPageCustomRangeTitle => '自定义时间段';
+
+  @override
+  String get statsPageCustomRangeStart => '开始';
+
+  @override
+  String get statsPageCustomRangeEnd => '结束';
+
+  @override
+  String get statsPageCustomRangeCancel => '取消';
+
+  @override
+  String get statsPageCustomRangeApply => '应用';
+
+  @override
   String get languageDisplaySimplifiedChinese => '简体中文';
 
   @override
@@ -5787,6 +5898,117 @@ class AppLocalizationsZhHans extends AppLocalizationsZh {
   String get settingsPageShare => '分享';
 
   @override
+  String get statsPageTitle => '统计';
+
+  @override
+  String get statsPageRangeAllTime => '全部';
+
+  @override
+  String get statsPageRangeLast30Days => '最近 30 天';
+
+  @override
+  String get statsPageRangePreviousMonth => '上个月';
+
+  @override
+  String get statsPageRangePreviousQuarter => '上个季度';
+
+  @override
+  String get statsPageRangeCustom => '自定义';
+
+  @override
+  String get statsPageHeatmapTitle => '聊天热力图';
+
+  @override
+  String get statsPageHeatmapLess => '少';
+
+  @override
+  String get statsPageHeatmapMore => '多';
+
+  @override
+  String get statsPageSummaryTitle => '总览';
+
+  @override
+  String get statsPageTotalConversations => '总对话数';
+
+  @override
+  String get statsPageTotalMessages => '总消息数';
+
+  @override
+  String get statsPageInputTokens => '输入 Tokens';
+
+  @override
+  String get statsPageOutputTokens => '输出 Tokens';
+
+  @override
+  String get statsPageCachedTokens => '缓存 Tokens';
+
+  @override
+  String get statsPageLaunchCount => '应用启动次数';
+
+  @override
+  String get statsPageUsageTrendTitle => '用量趋势';
+
+  @override
+  String get statsPageModelUsageTitle => '模型使用率';
+
+  @override
+  String get statsPageAssistantUsageTitle => '助手使用率';
+
+  @override
+  String get statsPageTopicVolumeTitle => '话题内容量';
+
+  @override
+  String get statsPageModelColumn => '模型';
+
+  @override
+  String get statsPageAssistantColumn => '助手';
+
+  @override
+  String get statsPageTopicColumn => '话题';
+
+  @override
+  String get statsPageMessagesColumn => '消息数';
+
+  @override
+  String get statsPageTopicsColumn => '话题数';
+
+  @override
+  String get statsPageEmptyTitle => '暂无统计数据';
+
+  @override
+  String get statsPageShowAllTooltip => '查看全部';
+
+  @override
+  String get statsPageClose => '关闭';
+
+  @override
+  String get statsPageUnknownProvider => '未知供应商';
+
+  @override
+  String get statsPageUnknownAssistant => '默认助手';
+
+  @override
+  String get statsPageUnknownModel => '未知模型';
+
+  @override
+  String get statsPageUnknownTopic => '未命名话题';
+
+  @override
+  String get statsPageCustomRangeTitle => '自定义时间段';
+
+  @override
+  String get statsPageCustomRangeStart => '开始';
+
+  @override
+  String get statsPageCustomRangeEnd => '结束';
+
+  @override
+  String get statsPageCustomRangeCancel => '取消';
+
+  @override
+  String get statsPageCustomRangeApply => '应用';
+
+  @override
   String get languageDisplaySimplifiedChinese => '简体中文';
 
   @override
@@ -11268,6 +11490,117 @@ class AppLocalizationsZhHant extends AppLocalizationsZh {
 
   @override
   String get settingsPageShare => '分享';
+
+  @override
+  String get statsPageTitle => '統計';
+
+  @override
+  String get statsPageRangeAllTime => '全部';
+
+  @override
+  String get statsPageRangeLast30Days => '最近 30 天';
+
+  @override
+  String get statsPageRangePreviousMonth => '上個月';
+
+  @override
+  String get statsPageRangePreviousQuarter => '上個季度';
+
+  @override
+  String get statsPageRangeCustom => '自訂';
+
+  @override
+  String get statsPageHeatmapTitle => '聊天熱力圖';
+
+  @override
+  String get statsPageHeatmapLess => '少';
+
+  @override
+  String get statsPageHeatmapMore => '多';
+
+  @override
+  String get statsPageSummaryTitle => '總覽';
+
+  @override
+  String get statsPageTotalConversations => '總對話數';
+
+  @override
+  String get statsPageTotalMessages => '總消息數';
+
+  @override
+  String get statsPageInputTokens => '輸入 Tokens';
+
+  @override
+  String get statsPageOutputTokens => '輸出 Tokens';
+
+  @override
+  String get statsPageCachedTokens => '快取 Tokens';
+
+  @override
+  String get statsPageLaunchCount => '應用啟動次數';
+
+  @override
+  String get statsPageUsageTrendTitle => '用量趨勢';
+
+  @override
+  String get statsPageModelUsageTitle => '模型使用率';
+
+  @override
+  String get statsPageAssistantUsageTitle => '助手使用率';
+
+  @override
+  String get statsPageTopicVolumeTitle => '話題內容量';
+
+  @override
+  String get statsPageModelColumn => '模型';
+
+  @override
+  String get statsPageAssistantColumn => '助手';
+
+  @override
+  String get statsPageTopicColumn => '話題';
+
+  @override
+  String get statsPageMessagesColumn => '消息數';
+
+  @override
+  String get statsPageTopicsColumn => '話題數';
+
+  @override
+  String get statsPageEmptyTitle => '暫無統計資料';
+
+  @override
+  String get statsPageShowAllTooltip => '查看全部';
+
+  @override
+  String get statsPageClose => '關閉';
+
+  @override
+  String get statsPageUnknownProvider => '未知供應商';
+
+  @override
+  String get statsPageUnknownAssistant => '預設助手';
+
+  @override
+  String get statsPageUnknownModel => '未知模型';
+
+  @override
+  String get statsPageUnknownTopic => '未命名話題';
+
+  @override
+  String get statsPageCustomRangeTitle => '自訂時間段';
+
+  @override
+  String get statsPageCustomRangeStart => '開始';
+
+  @override
+  String get statsPageCustomRangeEnd => '結束';
+
+  @override
+  String get statsPageCustomRangeCancel => '取消';
+
+  @override
+  String get statsPageCustomRangeApply => '套用';
 
   @override
   String get languageDisplaySimplifiedChinese => '简体中文';
