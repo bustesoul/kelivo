@@ -74,6 +74,8 @@ class _DisplaySettingsBody extends StatelessWidget {
                   _RowDivider(),
                   _ToggleRowShowModelTimestamp(),
                   _RowDivider(),
+                  _ToggleRowShowProviderInChatMessage(),
+                  _RowDivider(),
                   _ToggleRowShowTokenStats(),
                 ],
               ),
@@ -106,9 +108,13 @@ class _DisplaySettingsBody extends StatelessWidget {
                   _RowDivider(),
                   _ToggleRowShowToolResultSummary(),
                   _RowDivider(),
-                  _ToggleRowShowUpdates(),
+                  _ToggleRowInsertSuggestionOnly(),
                   _RowDivider(),
-                  _ToggleRowMsgNavButtons(),
+                  _ToggleRowRegenerateDeleteTrailingMessages(),
+                  _RowDivider(),
+                  _ToggleRowShowRegenerateConfirmDialog(),
+                  _RowDivider(),
+                  _ToggleRowShowUpdates(),
                   _RowDivider(),
                   _ToggleRowShowChatListDate(),
                   _RowDivider(),
@@ -117,6 +123,8 @@ class _DisplaySettingsBody extends StatelessWidget {
                   _ToggleRowNewChatAfterDelete(),
                   _RowDivider(),
                   _ToggleRowNewChatOnLaunch(),
+                  _RowDivider(),
+                  _ToggleRowMsgNavButtons(),
                   _RowDivider(),
                   _SendShortcutRow(),
                 ],
@@ -130,6 +138,8 @@ class _DisplaySettingsBody extends StatelessWidget {
                   _AutoScrollDelayRow(),
                   _RowDivider(),
                   _BackgroundMaskRow(),
+                  _RowDivider(),
+                  _ChatInputBackgroundOpacityRow(),
                   _RowDivider(),
                   _ToggleRowRequestLogging(),
                   _RowDivider(),
@@ -179,7 +189,7 @@ class _SettingsCard extends StatelessWidget {
                 // Align card title with other panes (15, semi-bold)
                 style: TextStyle(
                   fontSize: 15,
-                  fontWeight: FontWeight.w600,
+                  fontWeight: AppFontWeights.semibold,
                   color: cs.onSurface,
                 ),
               ),
@@ -230,7 +240,7 @@ class _LabeledRow extends StatelessWidget {
               // Match other settings row labels (14, normal, slightly dimmed)
               style: TextStyle(
                 fontSize: 14,
-                fontWeight: FontWeight.w400,
+                fontWeight: AppFontWeights.regular,
                 color: cs.onSurface.withValues(alpha: 0.9),
                 decoration: TextDecoration.none,
               ),
@@ -350,7 +360,7 @@ class _ThemeModeSegmentedState extends State<_ThemeModeSegmented> {
                         // Reduce segmented labels to 14 for consistency
                         style: TextStyle(
                           fontSize: 14,
-                          fontWeight: FontWeight.w400,
+                          fontWeight: AppFontWeights.regular,
                           color: (mode == items[i].$1)
                               ? cs.primary
                               : cs.onSurface.withValues(alpha: 0.82),
@@ -660,8 +670,8 @@ class _SimpleOptionTileState extends State<_SimpleOptionTile> {
                       fontSize: 14,
                       color: cs.onSurface.withValues(alpha: 0.88),
                       fontWeight: widget.selected
-                          ? FontWeight.w600
-                          : FontWeight.w400,
+                          ? AppFontWeights.semibold
+                          : AppFontWeights.regular,
                     ),
                   ),
                 ),
@@ -708,7 +718,7 @@ class _AppLanguageRowState extends State<_AppLanguageRow> {
         // measure desired content width for centering under trigger
         double measureContentWidth() {
           // Keep measurement consistent with dropdown item text (14)
-          final style = const TextStyle(fontSize: 14);
+          final style = TextStyle(fontSize: 14);
           final labels = <String>[
             '🖥️ ${AppLocalizations.of(ctx)!.settingsPageSystemMode}',
             '🇨🇳 ${AppLocalizations.of(ctx)!.displaySettingsPageLanguageChineseLabel}',
@@ -871,7 +881,7 @@ class _HoverDropdownButton extends StatelessWidget {
                         style: TextStyle(
                           fontSize: fontSize,
                           color: cs.onSurface.withValues(alpha: 0.9),
-                          fontWeight: FontWeight.w400,
+                          fontWeight: AppFontWeights.regular,
                         ),
                       ),
                     ),
@@ -896,7 +906,7 @@ class _HoverDropdownButton extends StatelessWidget {
                       style: TextStyle(
                         fontSize: fontSize,
                         color: cs.onSurface.withValues(alpha: 0.9),
-                        fontWeight: FontWeight.w400,
+                        fontWeight: AppFontWeights.regular,
                       ),
                     ),
                     const SizedBox(width: 6),
@@ -1250,10 +1260,7 @@ class _LanguageDropdownItemState extends State<_LanguageDropdownItem> {
             children: [
               Text(
                 widget.item.flag,
-                style: const TextStyle(
-                  fontSize: 16,
-                  decoration: TextDecoration.none,
-                ),
+                style: TextStyle(fontSize: 16, decoration: TextDecoration.none),
               ),
               const SizedBox(width: 8),
               Expanded(
@@ -1673,7 +1680,7 @@ Future<String?> _showDesktopFontChooserDialog(
                   style: TextStyle(
                     color: cs2.onSurface,
                     fontSize: 14,
-                    fontWeight: FontWeight.w600,
+                    fontWeight: AppFontWeights.semibold,
                   ),
                   textAlign: TextAlign.center,
                 ),
@@ -1722,9 +1729,9 @@ Future<String?> _showDesktopFontChooserDialog(
                         Expanded(
                           child: Text(
                             title,
-                            style: const TextStyle(
+                            style: TextStyle(
                               fontSize: 14,
-                              fontWeight: FontWeight.w700,
+                              fontWeight: AppFontWeights.emphasis,
                             ),
                           ),
                         ),
@@ -2022,6 +2029,21 @@ class _ToggleRowShowModelTimestamp extends StatelessWidget {
   }
 }
 
+class _ToggleRowShowProviderInChatMessage extends StatelessWidget {
+  const _ToggleRowShowProviderInChatMessage();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageShowProviderInChatMessageTitle,
+      value: sp.showProviderInChatMessage,
+      onChanged: (v) =>
+          context.read<SettingsProvider>().setShowProviderInChatMessage(v),
+    );
+  }
+}
+
 class _ToggleRowShowTokenStats extends StatelessWidget {
   const _ToggleRowShowTokenStats();
   @override
@@ -2186,6 +2208,52 @@ class _ToggleRowShowToolResultSummary extends StatelessWidget {
   }
 }
 
+class _ToggleRowInsertSuggestionOnly extends StatelessWidget {
+  const _ToggleRowInsertSuggestionOnly();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageInsertSuggestionOnlyTitle,
+      value: sp.insertSuggestionOnTapOnly,
+      onChanged: (v) =>
+          context.read<SettingsProvider>().setInsertSuggestionOnTapOnly(v),
+    );
+  }
+}
+
+class _ToggleRowRegenerateDeleteTrailingMessages extends StatelessWidget {
+  const _ToggleRowRegenerateDeleteTrailingMessages();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageRegenerateDeleteTrailingMessagesTitle,
+      value: sp.regenerateDeleteTrailingMessages,
+      onChanged: (v) => context
+          .read<SettingsProvider>()
+          .setRegenerateDeleteTrailingMessages(v),
+    );
+  }
+}
+
+class _ToggleRowShowRegenerateConfirmDialog extends StatelessWidget {
+  const _ToggleRowShowRegenerateConfirmDialog();
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.watch<SettingsProvider>();
+    return _ToggleRow(
+      label: l10n.displaySettingsPageShowRegenerateConfirmDialogTitle,
+      value: sp.showRegenerateConfirmDialog,
+      onChanged: (v) =>
+          context.read<SettingsProvider>().setShowRegenerateConfirmDialog(v),
+    );
+  }
+}
+
 class _ToggleRowAutoScrollEnabled extends StatelessWidget {
   const _ToggleRowAutoScrollEnabled();
   @override
@@ -2217,7 +2285,7 @@ class _ToggleRowRequestLogging extends StatelessWidget {
               l10n.requestLogSettingTitle,
               style: TextStyle(
                 fontSize: 14,
-                fontWeight: FontWeight.w400,
+                fontWeight: AppFontWeights.regular,
                 color: cs.onSurface.withValues(alpha: 0.9),
                 decoration: TextDecoration.none,
               ),
@@ -2274,7 +2342,7 @@ class _ToggleRowFlutterLogging extends StatelessWidget {
               l10n.flutterLogSettingTitle,
               style: TextStyle(
                 fontSize: 14,
-                fontWeight: FontWeight.w400,
+                fontWeight: AppFontWeights.regular,
                 color: cs.onSurface.withValues(alpha: 0.9),
                 decoration: TextDecoration.none,
               ),
@@ -2350,11 +2418,40 @@ class _ToggleRowMsgNavButtons extends StatelessWidget {
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context)!;
     final sp = context.watch<SettingsProvider>();
-    return _ToggleRow(
+    final options = <DesktopSelectOption<DesktopMessageNavButtonsMode>>[
+      DesktopSelectOption(
+        value: DesktopMessageNavButtonsMode.always,
+        label: l10n.displaySettingsPageMessageNavButtonsModeAlways,
+      ),
+      DesktopSelectOption(
+        value: DesktopMessageNavButtonsMode.scroll,
+        label: l10n.displaySettingsPageMessageNavButtonsModeScroll,
+      ),
+      DesktopSelectOption(
+        value: DesktopMessageNavButtonsMode.hover,
+        label: l10n.displaySettingsPageMessageNavButtonsModeHover,
+      ),
+      DesktopSelectOption(
+        value: DesktopMessageNavButtonsMode.scrollAndHover,
+        label: l10n.displaySettingsPageMessageNavButtonsModeScrollAndHover,
+      ),
+      DesktopSelectOption(
+        value: DesktopMessageNavButtonsMode.never,
+        label: l10n.displaySettingsPageMessageNavButtonsModeNever,
+      ),
+    ];
+
+    return _LabeledRow(
       label: l10n.displaySettingsPageMessageNavButtonsTitle,
-      value: sp.showMessageNavButtons,
-      onChanged: (v) =>
-          context.read<SettingsProvider>().setShowMessageNavButtons(v),
+      trailing: DesktopSelectDropdown<DesktopMessageNavButtonsMode>(
+        value: sp.desktopMessageNavButtonsMode,
+        options: options,
+        minWidth: 168,
+        maxLabelWidth: 190,
+        onSelected: (mode) => context
+            .read<SettingsProvider>()
+            .setDesktopMessageNavButtonsMode(mode),
+      ),
     );
   }
 }
@@ -2449,17 +2546,23 @@ class _ToggleRow extends StatelessWidget {
       child: Row(
         children: [
           Expanded(
-            child: Text(
-              label,
-              // Reduce toggle row label size to 14 to match other panes
-              style: TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w400,
-                color: cs.onSurface.withValues(alpha: 0.9),
-                decoration: TextDecoration.none,
-              ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  // Reduce toggle row label size to 14 to match other panes
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: AppFontWeights.regular,
+                    color: cs.onSurface.withValues(alpha: 0.9),
+                    decoration: TextDecoration.none,
+                  ),
+                ),
+              ],
             ),
           ),
+          const SizedBox(width: 12),
           IosSwitch(value: value, onChanged: onChanged),
         ],
       ),
@@ -2687,6 +2790,123 @@ class _BackgroundMaskRowState extends State<_BackgroundMaskRow> {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _ChatInputBackgroundOpacityRow extends StatefulWidget {
+  const _ChatInputBackgroundOpacityRow();
+  @override
+  State<_ChatInputBackgroundOpacityRow> createState() =>
+      _ChatInputBackgroundOpacityRowState();
+}
+
+class _ChatInputBackgroundOpacityRowState
+    extends State<_ChatInputBackgroundOpacityRow> {
+  late final TextEditingController _lightController;
+  late final TextEditingController _darkController;
+  @override
+  void initState() {
+    super.initState();
+    final settings = context.read<SettingsProvider>();
+    _lightController = TextEditingController(
+      text: '${(settings.chatInputBackgroundOpacityLight * 100).round()}',
+    );
+    _darkController = TextEditingController(
+      text: '${(settings.chatInputBackgroundOpacityDark * 100).round()}',
+    );
+  }
+
+  @override
+  void dispose() {
+    _lightController.dispose();
+    _darkController.dispose();
+    super.dispose();
+  }
+
+  void _commit(Brightness brightness, TextEditingController controller) {
+    final text = controller.text;
+    final v = text.trim();
+    final n = double.tryParse(v);
+    if (n == null) return;
+    final clamped = (n / 100.0).clamp(0.0, 1.0);
+    context.read<SettingsProvider>().setChatInputBackgroundOpacity(
+      brightness,
+      clamped,
+    );
+    controller.text = '${(clamped * 100).round()}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    return _LabeledRow(
+      label: l10n.displaySettingsPageChatInputBackgroundOpacityTitle,
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _OpacityInputGroup(
+            label: l10n.settingsPageLightMode,
+            controller: _lightController,
+            onCommit: () => _commit(Brightness.light, _lightController),
+          ),
+          const SizedBox(width: 12),
+          _OpacityInputGroup(
+            label: l10n.settingsPageDarkMode,
+            controller: _darkController,
+            onCommit: () => _commit(Brightness.dark, _darkController),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _OpacityInputGroup extends StatelessWidget {
+  const _OpacityInputGroup({
+    required this.label,
+    required this.controller,
+    required this.onCommit,
+  });
+  final String label;
+  final TextEditingController controller;
+  final VoidCallback onCommit;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          label,
+          style: TextStyle(
+            color: cs.onSurface.withValues(alpha: 0.72),
+            fontSize: 13,
+            decoration: TextDecoration.none,
+          ),
+        ),
+        const SizedBox(width: 6),
+        IntrinsicWidth(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minWidth: 36, maxWidth: 72),
+            child: _BorderInput(
+              controller: controller,
+              onSubmitted: (_) => onCommit(),
+              onFocusLost: (_) => onCommit(),
+            ),
+          ),
+        ),
+        const SizedBox(width: 5),
+        Text(
+          '%',
+          style: TextStyle(
+            color: cs.onSurface.withValues(alpha: 0.7),
+            fontSize: 14,
+            decoration: TextDecoration.none,
+          ),
+        ),
+      ],
     );
   }
 }

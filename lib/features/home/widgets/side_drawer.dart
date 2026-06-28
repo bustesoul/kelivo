@@ -9,10 +9,12 @@ import '../../../core/services/chat/chat_service.dart';
 import '../../../core/services/api/chat_api_service.dart';
 import '../../../core/services/logging/flutter_logger.dart';
 import '../../../core/providers/settings_provider.dart';
+import '../../../core/providers/backup_reminder_provider.dart';
 import '../../../core/models/chat_item.dart';
 import '../../../core/providers/user_provider.dart';
 import '../../settings/pages/settings_page.dart';
 import '../../translate/pages/translate_page.dart';
+import '../../backup/pages/backup_page.dart';
 import '../../../core/providers/assistant_provider.dart';
 import '../../../core/providers/update_provider.dart';
 import '../../../core/models/assistant.dart';
@@ -36,9 +38,11 @@ import '../../../core/services/haptics.dart';
 import '../../../desktop/desktop_context_menu.dart';
 import '../../../desktop/menu_anchor.dart';
 import '../../../shared/widgets/emoji_text.dart';
+import '../../../theme/app_font_weights.dart';
 import '../../../core/providers/tag_provider.dart';
 import '../../assistant/widgets/assistant_select_sheet.dart';
 import '../../../desktop/hotkeys/sidebar_tab_bus.dart';
+import '../../../desktop/desktop_settings_navigation_bus.dart';
 import 'dart:async';
 import '../../../features/search/services/global_session_search_service.dart';
 import 'assistant_avatar.dart';
@@ -347,7 +351,7 @@ class _SideDrawerState extends State<SideDrawer> with TickerProviderStateMixin {
                         label,
                         style: TextStyle(
                           fontSize: 15,
-                          fontWeight: FontWeight.w500,
+                          fontWeight: AppFontWeights.medium,
                           color: color ?? cs.onSurface,
                         ),
                         maxLines: 1,
@@ -532,7 +536,7 @@ class _SideDrawerState extends State<SideDrawer> with TickerProviderStateMixin {
               onPressed: () => Navigator.of(ctx).pop(true),
               child: Text(
                 l10n.sideDrawerMenuDelete,
-                style: const TextStyle(color: Colors.red),
+                style: TextStyle(color: Colors.red),
               ),
             ),
           ],
@@ -654,7 +658,9 @@ class _SideDrawerState extends State<SideDrawer> with TickerProviderStateMixin {
 
     if (provKey == null || mdlId == null) return;
     final cfg = settings.getProviderConfig(provKey);
-    final budget = assistant?.thinkingBudget ?? settings.thinkingBudget;
+    final budget = settings.titleGenerationThinkingBudgetFor(
+      assistant?.thinkingBudget,
+    );
 
     // Content
     final msgs = chatService.getMessages(conversationId);
@@ -911,7 +917,7 @@ class _SideDrawerState extends State<SideDrawer> with TickerProviderStateMixin {
             style: TextStyle(
               fontSize: 12,
               color: textBase.withValues(alpha: 0.5),
-              fontWeight: FontWeight.w500,
+              fontWeight: AppFontWeights.medium,
             ),
           ),
         ),
@@ -932,12 +938,12 @@ class _SideDrawerState extends State<SideDrawer> with TickerProviderStateMixin {
                         : Colors.transparent);
               final titleStyle = TextStyle(
                 fontSize: 14,
-                fontWeight: FontWeight.w500,
+                fontWeight: AppFontWeights.medium,
                 color: textBase,
               );
               final titleHighlight = TextStyle(
                 fontSize: 14,
-                fontWeight: FontWeight.w500,
+                fontWeight: AppFontWeights.medium,
                 color: textBase,
                 backgroundColor: highlightColor,
               );
@@ -1072,6 +1078,115 @@ class _SideDrawerState extends State<SideDrawer> with TickerProviderStateMixin {
     ];
   }
 
+  void _openBackupSettings() {
+    Haptics.light();
+    if (_isDesktop) {
+      DesktopSettingsNavigationBus.instance.openBackup();
+      return;
+    }
+    Navigator.of(
+      context,
+    ).push(MaterialPageRoute(builder: (_) => const BackupPage()));
+  }
+
+  Widget _buildBackupReminderBanner(
+    BuildContext context,
+    Color textBase, {
+    required bool topicsOnly,
+  }) {
+    if (widget.globalSearchMode || topicsOnly) return const SizedBox.shrink();
+    final reminder = context.watch<BackupReminderProvider>();
+    if (!reminder.loaded || !reminder.shouldShowReminder) {
+      return const SizedBox.shrink();
+    }
+
+    final l10n = AppLocalizations.of(context)!;
+    final cs = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final bg = isDark
+        ? cs.primary.withValues(alpha: 0.18)
+        : cs.primary.withValues(alpha: 0.10);
+    final border = cs.primary.withValues(alpha: isDark ? 0.35 : 0.22);
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Semantics(
+        button: true,
+        label: l10n.backupReminderSidebarTitle,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            border: Border.all(color: border, width: 0.6),
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: IosCardPress(
+            baseColor: bg,
+            borderRadius: BorderRadius.circular(14),
+            padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
+            onTap: _openBackupSettings,
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Lucide.databaseBackup, size: 20, color: cs.primary),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        l10n.backupReminderSidebarTitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: _isDesktop ? 13.5 : 14.5,
+                          fontWeight: AppFontWeights.emphasis,
+                          color: textBase.withValues(alpha: 0.92),
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        l10n.backupReminderSidebarSubtitle,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: _isDesktop ? 12 : 12.5,
+                          height: 1.25,
+                          color: textBase.withValues(alpha: 0.68),
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        l10n.backupReminderSidebarAction,
+                        style: TextStyle(
+                          fontSize: _isDesktop ? 12.5 : 13,
+                          fontWeight: AppFontWeights.emphasis,
+                          color: cs.primary,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Tooltip(
+                  message: l10n.backupReminderSnoozeTooltip,
+                  child: IosIconButton(
+                    icon: Lucide.X,
+                    size: 16,
+                    color: textBase.withValues(alpha: 0.62),
+                    padding: const EdgeInsets.all(6),
+                    semanticLabel: l10n.backupReminderSnoozeTooltip,
+                    onTap: () => context
+                        .read<BackupReminderProvider>()
+                        .snoozeForSession(),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -1165,7 +1280,7 @@ class _SideDrawerState extends State<SideDrawer> with TickerProviderStateMixin {
                     style: TextStyle(
                       color: cs.primary,
                       fontSize: size * 0.42,
-                      fontWeight: FontWeight.w700,
+                      fontWeight: AppFontWeights.emphasis,
                     ),
                   ),
                 ),
@@ -1203,7 +1318,7 @@ class _SideDrawerState extends State<SideDrawer> with TickerProviderStateMixin {
           style: TextStyle(
             color: cs.primary,
             fontSize: size * 0.42,
-            fontWeight: FontWeight.w700,
+            fontWeight: AppFontWeights.emphasis,
           ),
         ),
       );
@@ -1233,6 +1348,11 @@ class _SideDrawerState extends State<SideDrawer> with TickerProviderStateMixin {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    _buildBackupReminderBanner(
+                      context,
+                      textBase,
+                      topicsOnly: topicsOnly,
+                    ),
                     // 1. 搜索框 + 历史按钮（固定头部）
                     if (_isDesktop)
                       // 桌面端
@@ -1780,7 +1900,7 @@ class _SideDrawerState extends State<SideDrawer> with TickerProviderStateMixin {
                                         overflow: TextOverflow.ellipsis,
                                         style: TextStyle(
                                           fontSize: 11.5,
-                                          fontWeight: FontWeight.w500,
+                                          fontWeight: AppFontWeights.medium,
                                           color: textBase.withValues(
                                             alpha: 0.52,
                                           ),
@@ -1868,7 +1988,7 @@ class _SideDrawerState extends State<SideDrawer> with TickerProviderStateMixin {
                                         overflow: TextOverflow.ellipsis,
                                         style: TextStyle(
                                           fontSize: _isDesktop ? 14 : 15,
-                                          fontWeight: FontWeight.w500,
+                                          fontWeight: AppFontWeights.medium,
                                           color: textBase,
                                         ),
                                       ),
@@ -2014,7 +2134,7 @@ class _SideDrawerState extends State<SideDrawer> with TickerProviderStateMixin {
                                     overflow: TextOverflow.ellipsis,
                                     style: TextStyle(
                                       fontSize: _isDesktop ? 14 : 16,
-                                      fontWeight: FontWeight.w700,
+                                      fontWeight: AppFontWeights.emphasis,
                                       color: textBase,
                                     ),
                                   ),
@@ -2249,9 +2369,9 @@ class _SideDrawerState extends State<SideDrawer> with TickerProviderStateMixin {
                   alignment: Alignment.centerLeft,
                   child: Text(
                     text,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 15,
-                      fontWeight: FontWeight.w500,
+                      fontWeight: AppFontWeights.medium,
                     ),
                   ),
                 ),
@@ -2569,7 +2689,7 @@ class _SideDrawerState extends State<SideDrawer> with TickerProviderStateMixin {
                       color: validGrapheme(value)
                           ? cs.primary
                           : cs.onSurface.withValues(alpha: 0.38),
-                      fontWeight: FontWeight.w600,
+                      fontWeight: AppFontWeights.semibold,
                     ),
                   ),
                 ),
@@ -2644,7 +2764,7 @@ class _SideDrawerState extends State<SideDrawer> with TickerProviderStateMixin {
                       color: valid(value)
                           ? cs.primary
                           : cs.onSurface.withValues(alpha: 0.38),
-                      fontWeight: FontWeight.w600,
+                      fontWeight: AppFontWeights.semibold,
                     ),
                   ),
                 ),
@@ -2814,7 +2934,7 @@ class _SideDrawerState extends State<SideDrawer> with TickerProviderStateMixin {
                           color: valid(value)
                               ? cs.primary
                               : cs.onSurface.withValues(alpha: 0.38),
-                          fontWeight: FontWeight.w600,
+                          fontWeight: AppFontWeights.semibold,
                         ),
                       ),
                     ),
@@ -2966,7 +3086,7 @@ class _SideDrawerState extends State<SideDrawer> with TickerProviderStateMixin {
                       color: valid(value)
                           ? cs.primary
                           : cs.onSurface.withValues(alpha: 0.38),
-                      fontWeight: FontWeight.w600,
+                      fontWeight: AppFontWeights.semibold,
                     ),
                   ),
                 ),
@@ -3062,8 +3182,7 @@ class _SideDrawerState extends State<SideDrawer> with TickerProviderStateMixin {
             },
           );
         },
-        onReorder: (oldIndex, newIndex) async {
-          if (newIndex > oldIndex) newIndex -= 1;
+        onReorderItem: (oldIndex, newIndex) async {
           try {
             await context.read<AssistantProvider>().reorderAssistantsWithin(
               subsetIds: subsetIds,
@@ -3194,8 +3313,8 @@ class _SideDrawerState extends State<SideDrawer> with TickerProviderStateMixin {
                             Expanded(
                               child: Text(
                                 title,
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.w700,
+                                style: TextStyle(
+                                  fontWeight: AppFontWeights.emphasis,
                                 ),
                               ),
                             ),
@@ -3252,7 +3371,7 @@ class _SideDrawerState extends State<SideDrawer> with TickerProviderStateMixin {
                           AppLocalizations.of(context)!.sideDrawerPinnedLabel,
                           style: TextStyle(
                             fontSize: 14,
-                            fontWeight: FontWeight.w600,
+                            fontWeight: AppFontWeights.semibold,
                             color: cs.primary,
                           ),
                         )
@@ -3317,7 +3436,7 @@ class _SideDrawerState extends State<SideDrawer> with TickerProviderStateMixin {
                             textAlign: TextAlign.left,
                             style: TextStyle(
                               fontSize: 14,
-                              fontWeight: FontWeight.w600,
+                              fontWeight: AppFontWeights.semibold,
                               color: cs.primary,
                             ),
                           )
@@ -3488,7 +3607,7 @@ class _ChatTileState extends State<_ChatTile> {
                     style: TextStyle(
                       fontSize: _isDesktop ? 14 : 15,
                       color: widget.textColor,
-                      fontWeight: FontWeight.w400,
+                      fontWeight: AppFontWeights.regular,
                     ),
                   ),
                 ),
@@ -3584,7 +3703,7 @@ class _GroupHeader extends StatelessWidget {
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                   fontSize: 13.5,
-                  fontWeight: FontWeight.w700,
+                  fontWeight: AppFontWeights.emphasis,
                   color: textBase,
                 ),
               ),
@@ -3710,10 +3829,11 @@ class _DesktopSidebarTabsState extends State<_DesktopSidebarTabs> {
                                         (Theme.of(
                                                   context,
                                                 ).textTheme.titleSmall ??
-                                                const TextStyle())
+                                                TextStyle())
                                             .copyWith(
                                               fontSize: 13.5,
-                                              fontWeight: FontWeight.w700,
+                                              fontWeight:
+                                                  AppFontWeights.emphasis,
                                               color: idx == 0
                                                   ? cs.primary
                                                   : widget.textColor.withValues(
@@ -3766,10 +3886,11 @@ class _DesktopSidebarTabsState extends State<_DesktopSidebarTabs> {
                                         (Theme.of(
                                                   context,
                                                 ).textTheme.titleSmall ??
-                                                const TextStyle())
+                                                TextStyle())
                                             .copyWith(
                                               fontSize: 13.5,
-                                              fontWeight: FontWeight.w700,
+                                              fontWeight:
+                                                  AppFontWeights.emphasis,
                                               color: idx == 1
                                                   ? cs.primary
                                                   : widget.textColor.withValues(
@@ -3976,7 +4097,7 @@ class _AssistantInlineTileState extends State<_AssistantInlineTile> {
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                   fontSize: _isDesktop ? 14 : 15,
-                  fontWeight: FontWeight.w600,
+                  fontWeight: AppFontWeights.medium,
                   color: widget.textColor,
                 ),
               ),

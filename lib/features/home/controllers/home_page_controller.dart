@@ -16,6 +16,7 @@ import '../../../core/providers/quick_phrase_provider.dart';
 import '../../../core/providers/instruction_injection_provider.dart';
 import '../../../core/providers/memory_provider.dart';
 import '../../../core/services/chat/chat_service.dart';
+import '../../../core/services/tts/tts_text_selection.dart';
 import '../../../core/services/haptics.dart';
 import '../../../l10n/app_localizations.dart';
 import '../../../shared/widgets/snackbar.dart';
@@ -35,15 +36,28 @@ import 'scroll_controller.dart' as scroll_ctrl;
 import 'home_view_model.dart';
 import '../services/message_builder_service.dart';
 import '../services/message_generation_service.dart';
+import '../services/ask_user_interaction_service.dart';
 import '../services/ocr_service.dart';
 import '../services/translation_service.dart';
 import '../services/file_upload_service.dart';
 import '../widgets/chat_input_bar.dart';
 import '../../model/widgets/model_select_sheet.dart';
 
+enum ChatSelectionMode { share, delete }
+
 /// Translation data for UI state (expanded/collapsed).
 class TranslationData {
   bool expanded = true; // default to expanded when translation is added
+}
+
+class UserMessageEditState {
+  const UserMessageEditState({
+    required this.messageId,
+    required this.previewText,
+  });
+
+  final String messageId;
+  final String previewText;
 }
 
 /// Controller that manages all state and service wiring for HomePage.
@@ -68,14 +82,27 @@ class HomePageController extends ChangeNotifier {
     required TextEditingController inputController,
     required ChatInputBarController mediaController,
     required ScrollController scrollController,
-  }) : _context = context,
-       _vsync = vsync,
-       _scaffoldKey = scaffoldKey,
-       _inputBarKey = inputBarKey,
-       _inputFocus = inputFocus,
-       _inputController = inputController,
-       _mediaController = mediaController,
-       _scrollController = scrollController {
+  }) : this._(
+         context,
+         vsync,
+         scaffoldKey,
+         inputBarKey,
+         inputFocus,
+         inputController,
+         mediaController,
+         scrollController,
+       );
+
+  HomePageController._(
+    this._context,
+    this._vsync,
+    this._scaffoldKey,
+    this._inputBarKey,
+    this._inputFocus,
+    this._inputController,
+    this._mediaController,
+    this._scrollController,
+  ) {
     _initialize();
   }
 
@@ -131,6 +158,7 @@ class HomePageController extends ChangeNotifier {
 
   // Selection mode
   bool _selecting = false;
+  ChatSelectionMode _selectionMode = ChatSelectionMode.share;
   final Set<String> _selectedItems = <String>{};
   bool _showThinkingTools = false;
   bool _showThinkingContent = false;
@@ -163,6 +191,8 @@ class HomePageController extends ChangeNotifier {
   // Input bar measurement
   double _inputBarHeight = 72;
 
+  UserMessageEditState? _userMessageEditState;
+
   // Animation tuning
   static const Duration _postSwitchScrollDelay = Duration(milliseconds: 220);
   static const double _sidebarMinWidth = 200;
@@ -184,6 +214,7 @@ class HomePageController extends ChangeNotifier {
   Map<String, TranslationData> get translations => _translations;
   ChatController get chatController => _chatController;
   bool get selecting => _selecting;
+  ChatSelectionMode get selectionMode => _selectionMode;
   Set<String> get selectedItems => _selectedItems;
   int get selectedCount => _selectedItems.length;
   bool get showThinkingTools => _showThinkingTools;
@@ -199,6 +230,8 @@ class HomePageController extends ChangeNotifier {
   String get globalSearchQuery => _globalSearchQuery;
   String? get spotlightMessageId => _spotlightMessageId;
   int get spotlightToken => _spotlightToken;
+  UserMessageEditState? get userMessageEditState => _userMessageEditState;
+  bool get isUserMessageEditActive => _userMessageEditState != null;
 
   static double get sidebarMinWidth => _sidebarMinWidth;
   static double get sidebarMaxWidth => _sidebarMaxWidth;
@@ -240,6 +273,12 @@ class HomePageController extends ChangeNotifier {
   QueuedChatInput? get currentQueuedInput => _viewModel.currentQueuedInput;
 
   ValueNotifier<bool> get isProcessingFiles => _viewModel.isProcessingFiles;
+
+  bool get isTemporaryConversation =>
+      _chatService.isTemporaryConversation(currentConversation?.id);
+
+  bool get canToggleTemporaryConversation =>
+      currentConversation != null && messages.isEmpty;
 
   @override
   void notifyListeners() {
@@ -299,7 +338,6 @@ class HomePageController extends ChangeNotifier {
     _fileUploadService = FileUploadService(
       getContext: () => _context,
       mediaController: _mediaController,
-      onScrollToBottom: () => _scrollToBottomSoon(),
     );
     _messageBuilderService = MessageBuilderService(
       chatService: _chatService,
@@ -383,6 +421,7 @@ class HomePageController extends ChangeNotifier {
       // Trigger UI update when streaming finishes
       notifyListeners();
     };
+    _viewModel.onAssistantMessageFinished = _handleAssistantMessageFinished;
   }
 
   String _localizeGenerationError(AppLocalizations l10n, String error) {
@@ -550,6 +589,11 @@ class HomePageController extends ChangeNotifier {
         _restoreMessageUiState();
         notifyListeners();
         _scrollToBottomSoon(animate: false);
+      } else {
+        // No conversations exist — create a new empty one so the UI
+        // correctly shows the temporary-chat toggle button instead of
+        // falling back to "new conversation" button.
+        await _createNewConversation();
       }
     }
   }
@@ -584,6 +628,14 @@ class HomePageController extends ChangeNotifier {
         input.documents.isEmpty) {
       return ChatInputSubmissionResult.rejected;
     }
+    final editState = _userMessageEditState;
+    if (editState != null) {
+      final newMsg = await _saveEditedUserMessageVersion(input, editState);
+      if (newMsg == null) return ChatInputSubmissionResult.rejected;
+      _exitUserMessageEdit(clearDraft: false);
+      await regenerateAtMessage(newMsg);
+      return ChatInputSubmissionResult.sent;
+    }
     if (currentConversation == null) {
       await _createNewConversation();
     }
@@ -593,6 +645,34 @@ class HomePageController extends ChangeNotifier {
       notifyListeners();
     }
     return result;
+  }
+
+  Future<void> sendSuggestion(String suggestion) async {
+    final text = suggestion.trim();
+    if (text.isEmpty) return;
+    final settings = _context.read<SettingsProvider>();
+    if (settings.insertSuggestionOnTapOnly) {
+      _replaceInputWithSuggestion(text);
+      return;
+    }
+    await sendMessage(ChatInputData(text: text));
+  }
+
+  void _replaceInputWithSuggestion(String text) {
+    _inputController.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+      composing: TextRange.empty,
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_context.mounted) return;
+      _inputFocus.requestFocus();
+    });
+    notifyListeners();
+  }
+
+  Future<void> toggleTemporaryConversation() async {
+    await _viewModel.toggleTemporaryConversation();
   }
 
   void cancelQueuedMessage() {
@@ -618,25 +698,75 @@ class HomePageController extends ChangeNotifier {
   }) async {
     if (currentConversation == null) return;
 
-    final versioning = _messageGenerationService
-        .calculateRegenerationVersioning(
-          message: message,
-          messages: messages,
-          assistantAsNewReply: assistantAsNewReply,
-        );
-    if (versioning.lastKeep >= 0 && versioning.lastKeep < messages.length - 1) {
-      for (int i = versioning.lastKeep + 1; i < messages.length; i++) {
-        _translations.remove(messages[i].id);
+    final settings = _context.read<SettingsProvider>();
+    if (settings.regenerateDeleteTrailingMessages) {
+      final versioning = _messageGenerationService
+          .calculateRegenerationVersioning(
+            message: message,
+            messages: messages,
+            assistantAsNewReply: assistantAsNewReply,
+          );
+      if (versioning.lastKeep >= 0 &&
+          versioning.lastKeep < messages.length - 1) {
+        for (int i = versioning.lastKeep + 1; i < messages.length; i++) {
+          _translations.remove(messages[i].id);
+        }
       }
     }
 
     final success = await _viewModel.regenerateAtMessage(
       message,
       assistantAsNewReply: assistantAsNewReply,
+      allowImagesApiRouting: _mediaController.allowImagesApiRouting,
     );
     if (success) {
       notifyListeners();
     }
+  }
+
+  Future<void> submitRecoveredAskUserAnswer(
+    ChatMessage message,
+    ToolUIPart part,
+    AskUserResult result,
+  ) async {
+    if (currentConversation == null) return;
+
+    final content = result.toJsonString();
+    await _chatService.upsertToolEvent(
+      message.id,
+      id: part.id,
+      name: part.toolName,
+      arguments: part.arguments,
+      content: content,
+    );
+
+    final parts = List<ToolUIPart>.of(
+      _streamController.getToolParts(message.id) ?? const <ToolUIPart>[],
+    );
+    final idx = parts.indexWhere(
+      (candidate) =>
+          candidate.id == part.id ||
+          (candidate.id.isEmpty && candidate.toolName == part.toolName),
+    );
+    final answeredPart = ToolUIPart(
+      id: part.id,
+      toolName: part.toolName,
+      arguments: part.arguments,
+      content: content,
+      loading: false,
+    );
+    if (idx >= 0) {
+      parts[idx] = answeredPart;
+    } else {
+      parts.add(answeredPart);
+    }
+    _streamController.setToolParts(message.id, parts);
+    notifyListeners();
+
+    await _viewModel.continueAssistantMessageAfterToolAnswer(
+      message,
+      allowImagesApiRouting: _mediaController.allowImagesApiRouting,
+    );
   }
 
   Future<void> cancelStreaming() async {
@@ -653,6 +783,7 @@ class HomePageController extends ChangeNotifier {
       await _viewModel.flushCurrentConversationProgress();
     } catch (_) {}
     if (currentConversation?.id == id) return;
+    _exitUserMessageEdit(clearDraft: true);
     if (!isDesktopPlatform) {
       try {
         await _convoFadeController.reverse();
@@ -688,6 +819,7 @@ class HomePageController extends ChangeNotifier {
     try {
       await _viewModel.flushCurrentConversationProgress();
     } catch (_) {}
+    _exitUserMessageEdit(clearDraft: true);
     if (!isDesktopPlatform) {
       try {
         await _convoFadeController.reverse();
@@ -708,6 +840,7 @@ class HomePageController extends ChangeNotifier {
   }
 
   Future<void> _createNewConversation() async {
+    _exitUserMessageEdit(clearDraft: true);
     _translations.clear();
     await _viewModel.createNewConversation();
     notifyListeners();
@@ -721,8 +854,10 @@ class HomePageController extends ChangeNotifier {
 
   /// Compress context: summarize via LLM, create new conversation.
   /// Returns null on success, or an error string on failure.
-  Future<String?> compressContext() async {
-    final result = await _viewModel.compressContext();
+  Future<String?> compressContext({
+    required CompressContextOptions options,
+  }) async {
+    final result = await _viewModel.compressContext(options: options);
     if (result == null) {
       // Success - switched to new conversation
       _translations.clear();
@@ -760,6 +895,46 @@ class HomePageController extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> deleteSelectedMessages({required bool deleteAllVersions}) async {
+    final selectedMessageIds = Set<String>.of(_selectedItems);
+    if (selectedMessageIds.isEmpty) return;
+
+    final deletedMessageIds = _selectedMessageIdsForDeletion(
+      selectedMessageIds,
+      deleteAllVersions: deleteAllVersions,
+    );
+    for (final id in deletedMessageIds) {
+      _translations.remove(id);
+    }
+    await _viewModel.deleteMessages(
+      messageIds: selectedMessageIds,
+      deleteAllVersions: deleteAllVersions,
+    );
+    _selecting = false;
+    _selectedItems.clear();
+    notifyListeners();
+  }
+
+  Set<String> _selectedMessageIdsForDeletion(
+    Set<String> selectedMessageIds, {
+    required bool deleteAllVersions,
+  }) {
+    if (!deleteAllVersions) return selectedMessageIds;
+
+    final selectedGroupIds = <String>{};
+    final allMessages = _allCurrentConversationMessages();
+    for (final message in allMessages) {
+      if (selectedMessageIds.contains(message.id)) {
+        selectedGroupIds.add(message.groupId ?? message.id);
+      }
+    }
+    return {
+      for (final message in allMessages)
+        if (selectedGroupIds.contains(message.groupId ?? message.id))
+          message.id,
+    };
+  }
+
   Future<void> forkConversation(ChatMessage message) async {
     if (currentConversation == null) return;
     if (!isDesktopPlatform) {
@@ -778,6 +953,11 @@ class HomePageController extends ChangeNotifier {
   }
 
   Future<void> editMessage(ChatMessage message) async {
+    if (message.role == 'user') {
+      await startUserMessageEdit(message);
+      return;
+    }
+
     final ctx = _context;
     if (!ctx.mounted) return;
     final isDesktop = isDesktopPlatform;
@@ -787,13 +967,22 @@ class HomePageController extends ChangeNotifier {
     final MessageEditResult? result = await future;
     if (result == null) return;
 
+    if (currentConversation != null) {
+      await _chatService.clearConversationSuggestions(currentConversation!.id);
+      _viewModel.updateCurrentConversation(
+        _chatService.getConversation(currentConversation!.id),
+      );
+    }
+
     final newMsg = await _chatService.appendMessageVersion(
       messageId: message.id,
       content: result.content,
     );
     if (newMsg == null) return;
 
-    messages.add(newMsg);
+    if (_chatController.appendPersistedTailMessage(newMsg)) {
+      _viewModel.restoreMessageUiState();
+    }
     final gid = (newMsg.groupId ?? newMsg.id);
     versionSelections[gid] = newMsg.version;
     notifyListeners();
@@ -811,9 +1000,154 @@ class HomePageController extends ChangeNotifier {
     if (!result.shouldSend) return;
     if (message.role == 'assistant') {
       await regenerateAtMessage(newMsg, assistantAsNewReply: true);
-    } else {
-      await regenerateAtMessage(newMsg);
     }
+  }
+
+  Future<void> startUserMessageEdit(ChatMessage message) async {
+    final ctx = _context;
+    if (!ctx.mounted) return;
+    if (message.role != 'user') {
+      final l10n = AppLocalizations.of(ctx)!;
+      showAppSnackBar(
+        ctx,
+        message: l10n.userMessageEditUnsupportedSnackbar,
+        type: NotificationType.warning,
+      );
+      return;
+    }
+
+    final hasDraft =
+        _inputController.text.trim().isNotEmpty ||
+        _mediaController.hasDraftMedia;
+    if (hasDraft) {
+      final overwrite = await _confirmOverwriteInputDraft(ctx);
+      if (overwrite != true) return;
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      if (!ctx.mounted) return;
+    }
+
+    _enterUserMessageEdit(message);
+  }
+
+  void cancelUserMessageEdit() {
+    _exitUserMessageEdit(clearDraft: true);
+  }
+
+  void focusUserMessageEditInput() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_context.mounted) return;
+      _inputFocus.requestFocus();
+    });
+  }
+
+  Future<void> saveUserMessageEditOnly() async {
+    final editState = _userMessageEditState;
+    if (editState == null) return;
+    final input = _mediaController.snapshotInput(_inputController.text);
+    if (input.text.trim().isEmpty &&
+        input.imagePaths.isEmpty &&
+        input.documents.isEmpty) {
+      return;
+    }
+    final newMsg = await _saveEditedUserMessageVersion(input, editState);
+    if (newMsg == null) return;
+    _exitUserMessageEdit(clearDraft: true);
+  }
+
+  void _enterUserMessageEdit(ChatMessage message) {
+    final input = _messageBuilderService.parseInputFromRaw(
+      message.content,
+      includeMediaFilePathsAsImages: false,
+    );
+    final messageId = message.id;
+    _inputController.value = TextEditingValue(
+      text: input.text,
+      selection: TextSelection.collapsed(offset: input.text.length),
+      composing: TextRange.empty,
+    );
+    _mediaController.restoreInput(input);
+    _userMessageEditState = UserMessageEditState(
+      messageId: message.id,
+      previewText: input.text.isNotEmpty ? input.text : message.content.trim(),
+    );
+    notifyListeners();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_context.mounted) return;
+      if (_userMessageEditState?.messageId != messageId) return;
+      _inputFocus.requestFocus();
+    });
+  }
+
+  void _exitUserMessageEdit({required bool clearDraft}) {
+    if (_userMessageEditState == null) return;
+    _userMessageEditState = null;
+    if (clearDraft) {
+      _mediaController.clearDraft();
+    }
+    notifyListeners();
+    if (PlatformUtils.isMobileTarget) {
+      dismissKeyboard();
+    }
+  }
+
+  Future<ChatMessage?> _saveEditedUserMessageVersion(
+    ChatInputData input,
+    UserMessageEditState editState,
+  ) async {
+    final conversation = currentConversation;
+    if (conversation == null) return null;
+    final assistant = _context.read<AssistantProvider>().currentAssistant;
+    final content = MessageGenerationService.buildPersistedUserMessageContent(
+      input,
+      assistant: assistant,
+    );
+
+    await _chatService.clearConversationSuggestions(conversation.id);
+    _viewModel.updateCurrentConversation(
+      _chatService.getConversation(conversation.id),
+    );
+
+    final newMsg = await _chatService.appendMessageVersion(
+      messageId: editState.messageId,
+      content: content,
+    );
+    if (newMsg == null) return null;
+
+    if (_chatController.appendPersistedTailMessage(newMsg)) {
+      _viewModel.restoreMessageUiState();
+    }
+    final gid = newMsg.groupId ?? newMsg.id;
+    versionSelections[gid] = newMsg.version;
+    try {
+      await _chatService.setSelectedVersion(
+        conversation.id,
+        gid,
+        newMsg.version,
+      );
+    } catch (_) {}
+    notifyListeners();
+    return newMsg;
+  }
+
+  Future<bool?> _confirmOverwriteInputDraft(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(l10n.userMessageEditOverwriteTitle),
+        content: Text(l10n.userMessageEditOverwriteContent),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text(l10n.homePageCancel),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text(l10n.modelDetailSheetConfirmButton),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> translateMessage(ChatMessage message) async {
@@ -878,12 +1212,31 @@ class HomePageController extends ChangeNotifier {
     }
   }
 
+  void _handleAssistantMessageFinished(ChatMessage message) {
+    if (!_context.mounted || message.role != 'assistant') return;
+    final settings = _context.read<SettingsProvider>();
+    if (!settings.ttsAutoPlayAssistantReplies) return;
+    unawaited(_speakAssistantMessage(message, autoPlay: true));
+  }
+
   Future<void> speakMessage(ChatMessage message) async {
+    await _speakAssistantMessage(message, autoPlay: false);
+  }
+
+  Future<void> _speakAssistantMessage(
+    ChatMessage message, {
+    required bool autoPlay,
+  }) async {
+    final tts = _context.read<TtsProvider>();
+    if (!autoPlay && tts.playbackState.isActive) {
+      await tts.stop();
+      return;
+    }
+
     if (PlatformUtils.isDesktopTarget) {
       final sp = _context.read<SettingsProvider>();
-      final hasNetworkTts =
-          sp.ttsServiceSelected >= 0 && sp.ttsServices.isNotEmpty;
-      if (!hasNetworkTts) {
+      final hasNetworkTts = sp.selectedTtsService != null;
+      if (!hasNetworkTts && !tts.isAvailable) {
         showAppSnackBar(
           _context,
           message: AppLocalizations.of(_context)!.desktopTtsPleaseAddProvider,
@@ -892,17 +1245,32 @@ class HomePageController extends ChangeNotifier {
         return;
       }
     }
-    final tts = _context.read<TtsProvider>();
-    if (!tts.isSpeaking) {
-      await tts.speak(message.content);
-    } else {
-      await tts.stop();
-    }
+
+    final sp = _context.read<SettingsProvider>();
+    final text = TtsTextSelection.apply(
+      message.content,
+      mode: sp.ttsTextSelectionMode,
+    );
+    if (text.trim().isEmpty) return;
+    await tts.speak(text);
   }
 
   void shareMessage(int messageIndex, List<ChatMessage> messageList) {
+    startMessageSelection(
+      messageIndex: messageIndex,
+      messageList: messageList,
+      mode: ChatSelectionMode.share,
+    );
+  }
+
+  void startMessageSelection({
+    required int messageIndex,
+    required List<ChatMessage> messageList,
+    required ChatSelectionMode mode,
+  }) {
     dismissKeyboard();
     _selecting = true;
+    _selectionMode = mode;
     _selectedItems.clear();
     _showThinkingTools = false;
     _showThinkingContent = false;
@@ -956,8 +1324,39 @@ class HomePageController extends ChangeNotifier {
     notifyListeners();
   }
 
+  bool get selectedMessagesIncludeMultipleVersions {
+    return _selectedSelectionGroupIds().any((groupId) {
+      var count = 0;
+      for (final message in _allCurrentConversationMessages()) {
+        if ((message.groupId ?? message.id) == groupId) count++;
+        if (count > 1) return true;
+      }
+      return false;
+    });
+  }
+
+  Set<String> _selectedSelectionGroupIds() {
+    if (_selectedItems.isEmpty) return const <String>{};
+    return {
+      for (final message
+          in _chatController.allCollapsedMessagesForCurrentConversation())
+        if (_selectedItems.contains(message.id)) message.groupId ?? message.id,
+    };
+  }
+
+  List<ChatMessage> _allCurrentConversationMessages() {
+    final conversation = currentConversation;
+    if (conversation == null) return const <ChatMessage>[];
+    return _chatService.getMessagesRange(
+      conversation.id,
+      start: 0,
+      limit: _chatService.getMessageCount(conversation.id),
+    );
+  }
+
   void selectAll() {
-    final collapsed = _chatController.collapsedMessages;
+    final collapsed = _chatController
+        .allCollapsedMessagesForCurrentConversation();
     for (final m in collapsed) {
       if (m.role == 'user' || m.role == 'assistant') {
         _selectedItems.add(m.id);
@@ -967,7 +1366,8 @@ class HomePageController extends ChangeNotifier {
   }
 
   void toggleSelectAll() {
-    final collapsed = _chatController.collapsedMessages;
+    final collapsed = _chatController
+        .allCollapsedMessagesForCurrentConversation();
     final selectable = collapsed
         .where((m) => m.role == 'user' || m.role == 'assistant')
         .toList();
@@ -987,7 +1387,8 @@ class HomePageController extends ChangeNotifier {
   }
 
   void invertSelection() {
-    final collapsed = _chatController.collapsedMessages;
+    final collapsed = _chatController
+        .allCollapsedMessagesForCurrentConversation();
     for (final m in collapsed) {
       if (m.role != 'user' && m.role != 'assistant') continue;
       if (_selectedItems.contains(m.id)) {
@@ -1012,12 +1413,18 @@ class HomePageController extends ChangeNotifier {
   }
 
   List<ChatMessage> _selectedCollapsedMessages() {
-    final collapsed = _chatController.collapsedMessages;
-    final selected = <ChatMessage>[];
-    for (final m in collapsed) {
-      if (_selectedItems.contains(m.id)) selected.add(m);
-    }
-    return selected;
+    final convo = currentConversation;
+    if (convo == null) return const <ChatMessage>[];
+    final storedMessages = _chatService.getMessagesRange(
+      convo.id,
+      start: 0,
+      limit: _chatService.getMessageCount(convo.id),
+    );
+    return ChatController.selectedCollapsedMessagesForExport(
+      collapsedMessages: _chatController.collapseVersions(storedMessages),
+      selectedIds: _selectedItems,
+      storedMessages: storedMessages,
+    );
   }
 
   Future<void> exportSelectedAsMarkdown() async {
@@ -1104,11 +1511,7 @@ class HomePageController extends ChangeNotifier {
   Future<void> confirmSelection() async {
     final convo = currentConversation;
     if (convo == null) return;
-    final collapsed = _chatController.collapsedMessages;
-    final selected = <ChatMessage>[];
-    for (final m in collapsed) {
-      if (_selectedItems.contains(m.id)) selected.add(m);
-    }
+    final selected = _selectedCollapsedMessages();
     if (selected.isEmpty) {
       final l10n = AppLocalizations.of(_context)!;
       showAppSnackBar(
@@ -1131,6 +1534,7 @@ class HomePageController extends ChangeNotifier {
 
   void cancelSelection() {
     _selecting = false;
+    _selectionMode = ChatSelectionMode.share;
     _selectedItems.clear();
     notifyListeners();
   }
@@ -1378,14 +1782,29 @@ class HomePageController extends ChangeNotifier {
 
   void scrollToBottom({bool animate = true}) =>
       _scrollToBottom(animate: animate);
-  void forceScrollToBottom() => _scrollCtrl.forceScrollToBottom();
   void forceScrollToBottomSoon({bool animate = true}) =>
       _scrollCtrl.forceScrollToBottomSoon(
         animate: animate,
         postSwitchDelay: _postSwitchScrollDelay,
       );
 
+  bool loadMoreBefore() => _viewModel.loadMoreBefore();
+
+  bool loadMoreAfter() => _viewModel.loadMoreAfter();
+
+  List<ChatMessage> allCollapsedMessagesForCurrentConversation() =>
+      _chatController.allCollapsedMessagesForCurrentConversation();
+
   Future<void> scrollToMessageId(String targetId) async {
+    if (_chatController.indexOfCollapsedMessageId(targetId) < 0) {
+      final loaded = _viewModel.loadUntilMessageVisible(targetId);
+      if (loaded) {
+        _scrollCtrl.clearObserverCache();
+      }
+      try {
+        await WidgetsBinding.instance.endOfFrame;
+      } catch (_) {}
+    }
     final index = _chatController.indexOfCollapsedMessageId(targetId);
     if (index < 0) return;
     await _scrollCtrl.scrollToMessageId(targetId: targetId, targetIndex: index);
@@ -1406,7 +1825,25 @@ class HomePageController extends ChangeNotifier {
   }
 
   void scrollToTop({bool animate = true}) {
+    if (_chatController.hasMoreBefore) {
+      final loaded = _chatController.loadStartWindow();
+      if (loaded) {
+        _viewModel.restoreMessageUiState();
+        _scrollCtrl.clearObserverCache();
+      }
+    }
     _scrollCtrl.scrollToTop(animate: animate);
+  }
+
+  void forceScrollToBottom({bool animate = true}) {
+    if (_chatController.hasMoreAfter) {
+      final loaded = _chatController.loadEndWindow();
+      if (loaded) {
+        _viewModel.restoreMessageUiState();
+        _scrollCtrl.clearObserverCache();
+      }
+    }
+    _scrollToBottom(animate: animate);
   }
 
   // ============================================================================

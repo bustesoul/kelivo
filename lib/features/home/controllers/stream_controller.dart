@@ -25,12 +25,12 @@ export 'streaming_content_notifier.dart';
 /// by the home page to handle streaming generation without cluttering the UI code.
 class StreamController {
   StreamController({
-    required ChatService chatService,
+    required this._chatService,
     required this.onStateChanged,
     required this.getSettingsProvider,
     required this.getCurrentConversationId,
     this.onStreamTick,
-  }) : _chatService = chatService;
+  });
 
   final ChatService _chatService;
 
@@ -113,14 +113,20 @@ class StreamController {
   // Throttle State
   // ============================================================================
 
-  /// Throttle interval for streaming UI updates.
-  static const Duration _streamThrottleInterval = Duration(milliseconds: 60);
+  /// UI output interval for streaming content.
+  static const Duration _streamThrottleInterval = Duration(milliseconds: 50);
+  static const int _streamSmoothMinCount = 2;
+  static const int _streamSmoothBaseCount = 40;
+  static const int _streamSmoothMaxCount = 240;
+  static const double _streamSmoothPickRate = 0.1;
+  static const int _streamSmoothMoveAverageLength = 10;
 
   /// Throttle timers per message ID.
   final Map<String, Timer?> _streamThrottleTimers = <String, Timer?>{};
 
-  /// Pending content to be applied on next throttle tick.
-  final Map<String, String> _pendingStreamContent = <String, String>{};
+  /// Per-message smooth output state.
+  final Map<String, _StreamSmoothState> _streamSmoothStates =
+      <String, _StreamSmoothState>{};
 
   /// Delay before sanitizing inline base64 images.
   static const Duration _inlineImageSanitizeDelay = Duration(milliseconds: 120);
@@ -412,14 +418,40 @@ class StreamController {
 
   /// Deduplicate tool UI parts by id or by name+args when id is empty.
   List<ToolUIPart> dedupeToolPartsList(List<ToolUIPart> parts) {
-    final seen = <String>{};
+    final completedIds = <String>{
+      for (final p in parts)
+        if (p.id.trim().isNotEmpty && _hasToolContent(p.content)) p.id.trim(),
+    };
+    final completedNoIdBases = <String>{
+      for (final p in parts)
+        if (p.id.trim().isEmpty && _hasToolContent(p.content))
+          _toolDedupeBase(p.toolName, p.arguments),
+    };
+    final indexByKey = <String, int>{};
     final out = <ToolUIPart>[];
     for (final p in parts) {
-      final id = (p.id).trim();
-      final key = id.isNotEmpty
-          ? 'id:$id'
-          : 'name:${p.toolName}|args:${_encodeJson(p.arguments)}';
-      if (seen.add(key)) out.add(p);
+      final id = p.id.trim();
+      if (!_hasToolContent(p.content) &&
+          ((id.isNotEmpty && completedIds.contains(id)) ||
+              (id.isEmpty &&
+                  completedNoIdBases.contains(
+                    _toolDedupeBase(p.toolName, p.arguments),
+                  )))) {
+        continue;
+      }
+      final key = _toolDedupeKey(
+        id: p.id,
+        name: p.toolName,
+        arguments: p.arguments,
+        content: p.content,
+      );
+      final existingIndex = indexByKey[key];
+      if (existingIndex != null) {
+        if (id.isNotEmpty) out[existingIndex] = p;
+        continue;
+      }
+      indexByKey[key] = out.length;
+      out.add(p);
     }
     return out;
   }
@@ -428,7 +460,23 @@ class StreamController {
   List<Map<String, dynamic>> dedupeToolEvents(
     List<Map<String, dynamic>> events,
   ) {
-    final seen = <String>{};
+    final completedIds = <String>{
+      for (final e in events)
+        if ((e['id']?.toString() ?? '').trim().isNotEmpty &&
+            _hasToolContent(e['content']?.toString()))
+          (e['id']?.toString() ?? '').trim(),
+    };
+    final completedNoIdBases = <String>{
+      for (final e in events)
+        if ((e['id']?.toString() ?? '').trim().isEmpty &&
+            _hasToolContent(e['content']?.toString()))
+          _toolDedupeBase(
+            e['name']?.toString() ?? '',
+            (e['arguments'] as Map?)?.cast<String, dynamic>() ??
+                const <String, dynamic>{},
+          ),
+    };
+    final indexByKey = <String, int>{};
     final out = <Map<String, dynamic>>[];
     for (final e in events) {
       final id = (e['id']?.toString() ?? '').trim();
@@ -436,12 +484,49 @@ class StreamController {
       final args =
           ((e['arguments'] as Map?)?.cast<String, dynamic>() ??
           const <String, dynamic>{});
-      final key = id.isNotEmpty
-          ? 'id:$id'
-          : 'name:$name|args:${_encodeJson(args)}';
-      if (seen.add(key)) out.add(e.map((k, v) => MapEntry(k.toString(), v)));
+      if (!_hasToolContent(e['content']?.toString()) &&
+          ((id.isNotEmpty && completedIds.contains(id)) ||
+              (id.isEmpty &&
+                  completedNoIdBases.contains(_toolDedupeBase(name, args))))) {
+        continue;
+      }
+      final key = _toolDedupeKey(
+        id: id,
+        name: name,
+        arguments: args,
+        content: e['content']?.toString(),
+      );
+      final normalizedEvent = e.map((k, v) => MapEntry(k.toString(), v));
+      final existingIndex = indexByKey[key];
+      if (existingIndex != null) {
+        if (id.isNotEmpty) out[existingIndex] = normalizedEvent;
+        continue;
+      }
+      indexByKey[key] = out.length;
+      out.add(normalizedEvent);
     }
     return out;
+  }
+
+  String _toolDedupeBase(String name, Map<String, dynamic> arguments) {
+    return 'name:$name|args:${_encodeJson(arguments)}';
+  }
+
+  bool _hasToolContent(String? content) => content?.trim().isNotEmpty == true;
+
+  String _toolDedupeKey({
+    required String id,
+    required String name,
+    required Map<String, dynamic> arguments,
+    String? content,
+  }) {
+    final trimmedId = id.trim();
+    if (trimmedId.isNotEmpty) return 'id:$trimmedId';
+
+    final base = _toolDedupeBase(name, arguments);
+    final trimmedContent = content?.trim();
+    if (trimmedContent == null || trimmedContent.isEmpty) return base;
+    return '$base|content:$trimmedContent';
   }
 
   // ============================================================================
@@ -467,51 +552,102 @@ class StreamController {
     int? cachedTokens,
     int? durationMs,
   }) {
-    _pendingStreamContent[messageId] = content;
+    final state = _streamSmoothStates.putIfAbsent(
+      messageId,
+      _StreamSmoothState.new,
+    );
+    state
+      ..conversationId = conversationId
+      ..targetContent = content
+      ..totalTokens = totalTokens
+      ..contentSplitOffsets = contentSplitOffsets
+      ..reasoningCountAtSplit = reasoningCountAtSplit
+      ..toolCountAtSplit = toolCountAtSplit
+      ..promptTokens = promptTokens
+      ..completionTokens = completionTokens
+      ..cachedTokens = cachedTokens
+      ..durationMs = durationMs
+      ..updateMessageInList = updateMessageInList;
 
     // Ensure notifier exists for this message
     streamingContentNotifier.getNotifier(messageId);
 
     _streamThrottleTimers[messageId] ??= Timer.periodic(
       _streamThrottleInterval,
-      (_) {
-        final pending = _pendingStreamContent[messageId];
-        if (pending != null && getCurrentConversationId() == conversationId) {
-          // Use lightweight notifier instead of full page rebuild
-          streamingContentNotifier.updateContent(
-            messageId,
-            pending,
-            totalTokens,
-            contentSplitOffsets: contentSplitOffsets,
-            reasoningCountAtSplit: reasoningCountAtSplit,
-            toolCountAtSplit: toolCountAtSplit,
-            promptTokens: promptTokens,
-            completionTokens: completionTokens,
-            cachedTokens: cachedTokens,
-            durationMs: durationMs,
-          );
-          // Also update the message list data (without triggering rebuild)
-          updateMessageInList(messageId, pending, totalTokens);
-          onStreamTick?.call();
-        }
-      },
+      (_) => _flushSmoothStreamTick(messageId),
     );
+  }
+
+  void _flushSmoothStreamTick(String messageId) {
+    final state = _streamSmoothStates[messageId];
+    if (state == null) return;
+    if (getCurrentConversationId() != state.conversationId) return;
+
+    final nextContent = state.takeNextContentSlice(
+      minCount: _streamSmoothMinCount,
+      baseCount: _streamSmoothBaseCount,
+      maxCount: _streamSmoothMaxCount,
+      pickRate: _streamSmoothPickRate,
+      moveAverageLength: _streamSmoothMoveAverageLength,
+    );
+    if (nextContent == null) return;
+
+    _publishSmoothStreamContent(messageId, state, nextContent);
+  }
+
+  void _publishSmoothStreamContent(
+    String messageId,
+    _StreamSmoothState state,
+    String content,
+  ) {
+    streamingContentNotifier.updateContent(
+      messageId,
+      content,
+      state.totalTokens,
+      contentSplitOffsets: state.contentSplitOffsets,
+      reasoningCountAtSplit: state.reasoningCountAtSplit,
+      toolCountAtSplit: state.toolCountAtSplit,
+      promptTokens: state.promptTokens,
+      completionTokens: state.completionTokens,
+      cachedTokens: state.cachedTokens,
+      durationMs: state.durationMs,
+    );
+    state.updateMessageInList?.call(messageId, content, state.totalTokens);
+    onStreamTick?.call();
+  }
+
+  String? _flushPendingStreamUpdate(String messageId) {
+    final state = _streamSmoothStates[messageId];
+    if (state == null) return null;
+    final content = state.flushTargetContent();
+    if (content == null) return state.visibleContent;
+    if (getCurrentConversationId() == state.conversationId) {
+      _publishSmoothStreamContent(messageId, state, content);
+    } else {
+      state.updateMessageInList?.call(messageId, content, state.totalTokens);
+    }
+    return content;
   }
 
   /// Get pending stream content for a message.
   String? getPendingStreamContent(String messageId) =>
-      _pendingStreamContent[messageId];
+      _streamSmoothStates[messageId]?.targetContent;
 
   /// Set pending stream content (used by inline image sanitizer).
   void setPendingStreamContent(String messageId, String content) {
-    _pendingStreamContent[messageId] = content;
+    final state = _streamSmoothStates.putIfAbsent(
+      messageId,
+      _StreamSmoothState.new,
+    );
+    state.targetContent = content;
   }
 
   /// Clean up stream throttle timers for a message.
   void _cleanupStreamTimers(String messageId) {
+    _flushPendingStreamUpdate(messageId);
     _streamThrottleTimers[messageId]?.cancel();
     _streamThrottleTimers.remove(messageId);
-    _pendingStreamContent.remove(messageId);
+    _streamSmoothStates.remove(messageId);
     _inlineImageSanitizeTimers[messageId]?.cancel();
     _inlineImageSanitizeTimers.remove(messageId);
     _inlineImageSanitizing.remove(messageId);
@@ -538,7 +674,7 @@ class StreamController {
       timer?.cancel();
     }
     _streamThrottleTimers.clear();
-    _pendingStreamContent.clear();
+    _streamSmoothStates.clear();
     for (final timer in _inlineImageSanitizeTimers.values) {
       timer?.cancel();
     }
@@ -585,8 +721,8 @@ class StreamController {
               await MarkdownMediaSanitizer.replaceInlineBase64Images(current);
           if (sanitized == current) return;
 
-          // Keep throttled UI updates in sync
-          _pendingStreamContent[messageId] = sanitized;
+          // Keep throttled UI updates in sync.
+          setPendingStreamContent(messageId, sanitized);
           await onSanitized(messageId, sanitized);
         } catch (_) {
           // Swallow errors to avoid crashing streaming UI
@@ -628,10 +764,15 @@ class StreamController {
     );
 
     if (state.ctx.streamOutput) {
+      final initialExpanded = !getSettingsProvider().autoCollapseThinking;
+      final isNewReasoning = !_reasoning.containsKey(messageId);
       final r = _reasoning[messageId] ?? ReasoningData();
       r.text += chunk.reasoning!;
       r.startAt ??= DateTime.now();
       // NOTE: Do not reset r.expanded here - preserve user's toggle state during streaming
+      if (isNewReasoning) {
+        r.expanded = initialExpanded;
+      }
       _reasoning[messageId] = r;
 
       // Add to reasoning segments for mixed display
@@ -641,7 +782,7 @@ class StreamController {
         final newSegment = ReasoningSegmentData();
         newSegment.text = chunk.reasoning!;
         newSegment.startAt = DateTime.now();
-        newSegment.expanded = false;
+        newSegment.expanded = initialExpanded;
         newSegment.toolStartIndex = (_toolParts[messageId]?.length ?? 0);
         segments.add(newSegment);
       } else {
@@ -652,7 +793,7 @@ class StreamController {
           final newSegment = ReasoningSegmentData();
           newSegment.text = chunk.reasoning!;
           newSegment.startAt = DateTime.now();
-          newSegment.expanded = false;
+          newSegment.expanded = initialExpanded;
           newSegment.toolStartIndex = (_toolParts[messageId]?.length ?? 0);
           segments.add(newSegment);
         } else {
@@ -785,6 +926,8 @@ class StreamController {
             'name': c.name,
             'arguments': c.arguments,
             'content': null,
+            if (c.metadata != null && c.metadata!.isNotEmpty)
+              'metadata': c.metadata,
           },
       ];
       await setToolEventsInDb(messageId, dedupeToolEvents(newEvents));
@@ -801,6 +944,7 @@ class StreamController {
       required String name,
       required Map<String, dynamic> arguments,
       String? content,
+      Map<String, dynamic>? metadata,
     })
     upsertToolEventInDb,
   }) async {
@@ -849,6 +993,7 @@ class StreamController {
           name: r.name,
           arguments: args,
           content: r.content,
+          metadata: r.metadata,
         );
       } catch (_) {}
     }
@@ -1172,6 +1317,7 @@ class GenerationContext {
     required this.assistantMessage,
     required this.apiMessages,
     required this.userImagePaths,
+    required this.allowImagesApiRouting,
     required this.providerKey,
     required this.modelId,
     required this.assistant,
@@ -1184,33 +1330,36 @@ class GenerationContext {
     required this.supportsReasoning,
     required this.enableReasoning,
     required this.streamOutput,
+    this.ocrActive = false,
     this.generateTitleOnFinish = true,
   });
 
   final ChatMessage assistantMessage;
   final List<Map<String, dynamic>> apiMessages;
   final List<String> userImagePaths;
+  final bool allowImagesApiRouting;
   final String providerKey;
   final String modelId;
   final dynamic assistant;
   final SettingsProvider settings;
   final ProviderConfig config;
   final List<Map<String, dynamic>> toolDefs;
-  final Future<String> Function(String, Map<String, dynamic>)? onToolCall;
+  final ToolCallHandler? onToolCall;
   final Map<String, String>? extraHeaders;
   final Map<String, dynamic>? extraBody;
   final bool supportsReasoning;
   final bool enableReasoning;
   final bool streamOutput;
+  final bool ocrActive;
   final bool generateTitleOnFinish;
 }
 
 /// State object for streaming message generation.
 class StreamingState {
-  StreamingState(this.ctx);
+  StreamingState(this.ctx) : fullContentRaw = ctx.assistantMessage.content;
 
   final GenerationContext ctx;
-  String fullContentRaw = '';
+  String fullContentRaw;
   int totalTokens = 0;
   TokenUsage? usage;
   String bufferedReasoning = '';
@@ -1254,6 +1403,111 @@ class ContentSplitData {
   final List<int> offsets;
   final List<int> reasoningCounts;
   final List<int> toolCounts;
+}
+
+class _StreamSmoothState {
+  String conversationId = '';
+  String targetContent = '';
+  String visibleContent = '';
+  int totalTokens = 0;
+  List<int>? contentSplitOffsets;
+  List<int>? reasoningCountAtSplit;
+  List<int>? toolCountAtSplit;
+  int? promptTokens;
+  int? completionTokens;
+  int? cachedTokens;
+  int? durationMs;
+  void Function(String messageId, String content, int totalTokens)?
+  updateMessageInList;
+  final List<int> _recentPickCounts = <int>[];
+
+  String? takeNextContentSlice({
+    required int minCount,
+    required int baseCount,
+    required int maxCount,
+    required double pickRate,
+    required int moveAverageLength,
+  }) {
+    if (targetContent == visibleContent) return null;
+    if (!targetContent.startsWith(visibleContent)) {
+      visibleContent = targetContent;
+      _recentPickCounts.clear();
+      return visibleContent;
+    }
+
+    final backlog = targetContent.length - visibleContent.length;
+    if (backlog <= 0) return null;
+    final pickCount = _nextPickCount(
+      backlog: backlog,
+      minCount: minCount,
+      baseCount: baseCount,
+      maxCount: maxCount,
+      pickRate: pickRate,
+      moveAverageLength: moveAverageLength,
+    );
+    final nextLength = math.min(
+      targetContent.length,
+      visibleContent.length + pickCount,
+    );
+    visibleContent = targetContent.substring(0, nextLength);
+    return visibleContent;
+  }
+
+  String? flushTargetContent() {
+    if (targetContent == visibleContent) return null;
+    visibleContent = targetContent;
+    _recentPickCounts.clear();
+    return visibleContent;
+  }
+
+  int _nextPickCount({
+    required int backlog,
+    required int minCount,
+    required int baseCount,
+    required int maxCount,
+    required double pickRate,
+    required int moveAverageLength,
+  }) {
+    if (backlog <= minCount) return backlog;
+
+    final rawPick = _rawPickCount(
+      backlog: backlog,
+      minCount: minCount,
+      baseCount: baseCount,
+      maxCount: maxCount,
+      pickRate: pickRate,
+    );
+    _recentPickCounts.add(rawPick);
+    if (_recentPickCounts.length > moveAverageLength) {
+      _recentPickCounts.removeAt(0);
+    }
+
+    final average =
+        _recentPickCounts.reduce((a, b) => a + b) / _recentPickCounts.length;
+    return average.round().clamp(minCount, backlog).toInt();
+  }
+
+  int _rawPickCount({
+    required int backlog,
+    required int minCount,
+    required int baseCount,
+    required int maxCount,
+    required double pickRate,
+  }) {
+    if (backlog <= minCount) return backlog;
+
+    double effectivePickRate;
+    if (backlog < baseCount) {
+      effectivePickRate = pickRate * backlog / baseCount;
+    } else if (backlog >= maxCount) {
+      effectivePickRate = math.max((backlog - baseCount) / backlog, pickRate);
+    } else {
+      final t = (backlog - baseCount) / (maxCount - baseCount);
+      effectivePickRate = pickRate + (0.5 - pickRate) * t;
+    }
+
+    return math.max(minCount, (backlog * effectivePickRate).round());
+  }
 }
 
 // ============================================================================

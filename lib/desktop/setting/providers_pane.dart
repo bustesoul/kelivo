@@ -10,16 +10,65 @@ class _DesktopProvidersBody extends StatefulWidget {
 }
 
 class _DesktopProvidersBodyState extends State<_DesktopProvidersBody> {
+  static const Duration _groupReorderRestoreDelay = Duration(milliseconds: 300);
+  static const Duration _groupReorderCollapseDelay = Duration(milliseconds: 32);
+
   String? _selectedKey;
   final GlobalKey<_DesktopProviderDetailPaneState> _detailKey =
       GlobalKey<_DesktopProviderDetailPaneState>();
   final TextEditingController _searchController = TextEditingController();
   String _searchQuery = '';
+  Timer? _groupReorderRestoreTimer;
+  Timer? _groupReorderCollapseTimer;
+  Timer? _groupReorderRestoreStartTimer;
+  bool _temporarilyCollapseGroupedProviders = false;
+  bool _groupHeaderDragActive = false;
+  bool _groupHeaderRestorePending = false;
 
   @override
   void dispose() {
+    _groupReorderRestoreTimer?.cancel();
+    _groupReorderCollapseTimer?.cancel();
+    _groupReorderRestoreStartTimer?.cancel();
     _searchController.dispose();
     super.dispose();
+  }
+
+  bool _effectiveGroupCollapsed(SettingsProvider settings, String groupKey) =>
+      _temporarilyCollapseGroupedProviders ||
+      settings.isGroupCollapsed(groupKey);
+
+  void _startTemporaryGroupCollapse() {
+    _groupReorderRestoreTimer?.cancel();
+    setState(() {
+      _temporarilyCollapseGroupedProviders = true;
+      _groupHeaderRestorePending = false;
+    });
+  }
+
+  void _scheduleTemporaryGroupCollapse() {
+    _groupReorderCollapseTimer?.cancel();
+    _groupReorderCollapseTimer = Timer(_groupReorderCollapseDelay, () {
+      if (!mounted || !_groupHeaderDragActive) return;
+      _startTemporaryGroupCollapse();
+    });
+  }
+
+  void _scheduleTemporaryGroupRestore() {
+    _groupReorderCollapseTimer?.cancel();
+    _groupReorderRestoreTimer?.cancel();
+    _groupReorderRestoreStartTimer?.cancel();
+    _groupReorderRestoreStartTimer = Timer(Duration.zero, () {
+      if (!mounted) return;
+      setState(() => _groupHeaderRestorePending = true);
+    });
+    _groupReorderRestoreTimer = Timer(_groupReorderRestoreDelay, () {
+      if (!mounted) return;
+      setState(() {
+        _temporarilyCollapseGroupedProviders = false;
+        _groupHeaderRestorePending = false;
+      });
+    });
   }
 
   String _normalizeSearchQuery(String value) => value.trim().toLowerCase();
@@ -61,6 +110,7 @@ class _DesktopProvidersBodyState extends State<_DesktopProvidersBody> {
     required AppLocalizations l10n,
     required SettingsProvider settings,
     required List<({String name, String key})> items,
+    required bool Function(String groupKey) isGroupCollapsed,
     String normalizedQuery = '',
   }) {
     final ungroupedKey = SettingsProvider.providerUngroupedGroupKey;
@@ -105,39 +155,31 @@ class _DesktopProvidersBodyState extends State<_DesktopProvidersBody> {
       ];
     }
 
-    for (final g in groups) {
-      final list = providersForGroup(g.id, g.name);
+    final displayKeys = buildProviderGroupDisplayKeys(
+      groups: groups,
+      ungroupedIndex: settings.providerUngroupedDisplayIndex,
+    );
+
+    for (final groupKey in displayKeys) {
+      final isUngrouped = groupKey == ungroupedKey;
+      final title = isUngrouped
+          ? l10n.providerGroupsOther
+          : groupById[groupKey]?.name;
+      if (title == null) continue;
+      final list = providersForGroup(groupKey, title);
       if (list.isEmpty) continue;
-      final collapsed = searching ? false : settings.isGroupCollapsed(g.id);
+      final collapsed = searching ? false : isGroupCollapsed(groupKey);
       rows.add(
         _DesktopProviderGroupingHeaderVM(
-          groupKey: g.id,
-          title: g.name,
+          groupKey: groupKey,
+          title: title,
           count: list.length,
           collapsed: collapsed,
         ),
       );
       for (final p in list) {
-        rows.add(_DesktopProviderGroupingProviderVM(item: p, groupKey: g.id));
-      }
-    }
-
-    final ungrouped = providersForGroup(ungroupedKey, l10n.providerGroupsOther);
-    if (ungrouped.isNotEmpty) {
-      final collapsed = searching
-          ? false
-          : settings.isGroupCollapsed(ungroupedKey);
-      rows.add(
-        _DesktopProviderGroupingHeaderVM(
-          groupKey: ungroupedKey,
-          title: l10n.providerGroupsOther,
-          count: ungrouped.length,
-          collapsed: collapsed,
-        ),
-      );
-      for (final p in ungrouped) {
         rows.add(
-          _DesktopProviderGroupingProviderVM(item: p, groupKey: ungroupedKey),
+          _DesktopProviderGroupingProviderVM(item: p, groupKey: groupKey),
         );
       }
     }
@@ -159,6 +201,7 @@ class _DesktopProvidersBodyState extends State<_DesktopProvidersBody> {
     required ({String name, String key}) item,
     required SettingsProvider settings,
     required List<({String name, String key})> ordered,
+    required Set<String> baseKeys,
     required ColorScheme colorScheme,
   }) {
     final cfg = settings.getProviderConfig(item.key, defaultName: item.name);
@@ -190,46 +233,46 @@ class _DesktopProvidersBodyState extends State<_DesktopProvidersBody> {
         });
       },
       onDelete: () async {
-        final l10n = AppLocalizations.of(context)!;
-        final ap = context.read<AssistantProvider>();
-        final ok = await showDialog<bool>(
-          context: context,
-          builder: (ctx) => AlertDialog(
-            title: Text(l10n.providerDetailPageDeleteProviderTitle),
-            content: Text(l10n.providerDetailPageDeleteProviderContent),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(ctx).pop(false),
-                child: Text(l10n.providerDetailPageCancelButton),
-              ),
-              TextButton(
-                onPressed: () => Navigator.of(ctx).pop(true),
-                child: Text(
-                  l10n.providerDetailPageDeleteButton,
-                  style: const TextStyle(color: Colors.red),
+              final l10n = AppLocalizations.of(context)!;
+              final ap = context.read<AssistantProvider>();
+              final ok = await showDialog<bool>(
+                context: context,
+                builder: (ctx) => AlertDialog(
+                  title: Text(l10n.providerDetailPageDeleteProviderTitle),
+                  content: Text(l10n.providerDetailPageDeleteProviderContent),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.of(ctx).pop(false),
+                      child: Text(l10n.providerDetailPageCancelButton),
+                    ),
+                    TextButton(
+                      onPressed: () => Navigator.of(ctx).pop(true),
+                      child: Text(
+                        l10n.providerDetailPageDeleteButton,
+                        style: TextStyle(color: Colors.red),
+                      ),
+                    ),
+                  ],
                 ),
-              ),
-            ],
-          ),
-        );
-        if (ok != true) return;
-        try {
-          for (final assistant in ap.assistants) {
-            if (assistant.chatModelProvider == item.key) {
-              await ap.updateAssistant(
-                assistant.copyWith(clearChatModel: true),
               );
-            }
-          }
-        } catch (_) {}
-        await settings.removeProviderConfig(item.key);
-        if (!mounted) return;
-        setState(() {
-          if (_selectedKey == item.key) {
-            _selectedKey = ordered.isNotEmpty ? ordered.first.key : null;
-          }
-        });
-      },
+              if (ok != true) return;
+              try {
+                for (final assistant in ap.assistants) {
+                  if (assistant.chatModelProvider == item.key) {
+                    await ap.updateAssistant(
+                      assistant.copyWith(clearChatModel: true),
+                    );
+                  }
+                }
+              } catch (_) {}
+              await settings.removeProviderConfig(item.key);
+              if (!mounted) return;
+              setState(() {
+                if (_selectedKey == item.key) {
+                  _selectedKey = ordered.isNotEmpty ? ordered.first.key : null;
+                }
+              });
+            },
     );
   }
 
@@ -256,11 +299,8 @@ class _DesktopProvidersBodyState extends State<_DesktopProvidersBody> {
       (name: l10n.providersPageByteDanceName, key: 'ByteDance'),
     ];
 
-    final baseItems = base()
-        .where((p) => !settings.isBuiltInProviderRemoved(p.key))
-        .toList();
     final cfgs = settings.providerConfigs;
-    final baseKeys = {for (final p in baseItems) p.key};
+    final baseKeys = {for (final p in base()) p.key};
     final dynamicItems = <({String name, String key})>[];
     cfgs.forEach((key, cfg) {
       if (!baseKeys.contains(key)) {
@@ -271,7 +311,7 @@ class _DesktopProvidersBodyState extends State<_DesktopProvidersBody> {
       }
     });
     // Apply saved order
-    final merged = <({String name, String key})>[...baseItems, ...dynamicItems];
+    final merged = <({String name, String key})>[...base(), ...dynamicItems];
     final order = settings.providersOrder;
     final map = {for (final p in merged) p.key: p};
     final ordered = <({String name, String key})>[];
@@ -291,6 +331,8 @@ class _DesktopProvidersBodyState extends State<_DesktopProvidersBody> {
             l10n: l10n,
             settings: settings,
             items: ordered,
+            isGroupCollapsed: (groupKey) =>
+                _effectiveGroupCollapsed(settings, groupKey),
             normalizedQuery: _searchQuery,
           )
         : const <_DesktopProviderGroupingRowVM>[];
@@ -345,8 +387,31 @@ class _DesktopProvidersBodyState extends State<_DesktopProvidersBody> {
                               buildDefaultDragHandles: false,
                               padding: EdgeInsets.zero,
                               itemCount: groupingRows.length,
-                              onReorder: (oldIndex, newIndex) async {
-                                if (_searchQuery.isNotEmpty) return;
+                              onReorderStart: (index) {
+                                if (index < 0 || index >= groupingRows.length) {
+                                  return;
+                                }
+                                if (groupingRows[index]
+                                    is! _DesktopProviderGroupingHeaderVM) {
+                                  return;
+                                }
+                                _groupHeaderDragActive = true;
+                                _scheduleTemporaryGroupCollapse();
+                              },
+                              onReorderEnd: (_) {
+                                if (!_groupHeaderDragActive) return;
+                                _groupHeaderDragActive = false;
+                                if (_temporarilyCollapseGroupedProviders) {
+                                  _scheduleTemporaryGroupRestore();
+                                } else {
+                                  _groupReorderCollapseTimer?.cancel();
+                                  _groupReorderRestoreStartTimer?.cancel();
+                                }
+                              },
+                              onReorderItem: (oldIndex, newIndex) async {
+                                if (_searchQuery.isNotEmpty) {
+                                  return;
+                                }
                                 if (groupingRows.isEmpty) return;
                                 final sp = context.read<SettingsProvider>();
 
@@ -363,6 +428,58 @@ class _DesktopProvidersBodyState extends State<_DesktopProvidersBody> {
                                         groupKey: r.groupKey,
                                       ),
                                 ];
+
+                                if (logicRows[oldIndex]
+                                    is ProviderGroupingHeaderVM) {
+                                  final intent =
+                                      analyzeProviderGroupingHeaderReorder(
+                                        rows: logicRows,
+                                        oldIndex: oldIndex,
+                                        newIndex: newIndex,
+                                      );
+                                  if (intent == null) return;
+
+                                  final visibleHeaderKeys = [
+                                    for (final row in groupingRows)
+                                      if (row
+                                          is _DesktopProviderGroupingHeaderVM)
+                                        row.groupKey,
+                                  ];
+                                  final fullDisplayKeys =
+                                      buildProviderGroupDisplayKeys(
+                                        groups: sp.providerGroups,
+                                        ungroupedIndex:
+                                            sp.providerUngroupedDisplayIndex,
+                                      );
+                                  final oldActualIndex = fullDisplayKeys
+                                      .indexOf(intent.groupKey);
+                                  if (oldActualIndex < 0) return;
+
+                                  final targetInsertIndex =
+                                      mapVisibleGroupTargetToActualInsertIndex(
+                                        fullDisplayKeys: fullDisplayKeys,
+                                        visibleHeaderKeys: visibleHeaderKeys,
+                                        movedGroupKey: intent.groupKey,
+                                        targetVisibleIndex:
+                                            intent.targetDisplayIndex,
+                                      );
+                                  final rawNewIndex =
+                                      targetInsertIndex > oldActualIndex
+                                      ? targetInsertIndex + 1
+                                      : targetInsertIndex;
+
+                                  try {
+                                    await sp.reorderProviderGroupsWithUngrouped(
+                                      oldActualIndex,
+                                      rawNewIndex,
+                                    );
+                                  } finally {
+                                    if (!_groupHeaderDragActive) {
+                                      _scheduleTemporaryGroupRestore();
+                                    }
+                                  }
+                                  return;
+                                }
 
                                 final analysis = analyzeProviderGroupingReorder(
                                   rows: logicRows,
@@ -419,27 +536,53 @@ class _DesktopProvidersBodyState extends State<_DesktopProvidersBody> {
                                         bottom: 6,
                                         top: i == 0 ? 0 : 6,
                                       ),
-                                      child: _DesktopProviderGroupHeaderRow(
-                                        title: row.title,
-                                        count: row.count,
-                                        collapsed: row.collapsed,
-                                        onToggle: _searchQuery.isNotEmpty
-                                            ? null
-                                            : () => unawaited(
-                                                context
-                                                    .read<SettingsProvider>()
-                                                    .toggleGroupCollapsed(
-                                                      row.groupKey,
+                                      child:
+                                          _searchQuery.isNotEmpty ||
+                                              _groupHeaderRestorePending
+                                          ? _DesktopProviderGroupHeaderRow(
+                                              title: row.title,
+                                              count: row.count,
+                                              collapsed: row.collapsed,
+                                              onToggle: _searchQuery.isNotEmpty
+                                                  ? null
+                                                  : () => unawaited(
+                                                      context
+                                                          .read<
+                                                            SettingsProvider
+                                                          >()
+                                                          .toggleGroupCollapsed(
+                                                            row.groupKey,
+                                                          ),
                                                     ),
-                                              ),
-                                      ),
+                                            )
+                                          : ReorderableDragStartListener(
+                                              index: i,
+                                              child:
+                                                  _DesktopProviderGroupHeaderRow(
+                                                    title: row.title,
+                                                    count: row.count,
+                                                    collapsed: row.collapsed,
+                                                    onToggle: () => unawaited(
+                                                      context
+                                                          .read<
+                                                            SettingsProvider
+                                                          >()
+                                                          .toggleGroupCollapsed(
+                                                            row.groupKey,
+                                                          ),
+                                                    ),
+                                                  ),
+                                            ),
                                     ),
                                   );
                                 }
                                 if (row is _DesktopProviderGroupingProviderVM) {
                                   final collapsed = _searchQuery.isNotEmpty
                                       ? false
-                                      : settings.isGroupCollapsed(row.groupKey);
+                                      : _effectiveGroupCollapsed(
+                                          settings,
+                                          row.groupKey,
+                                        );
                                   return KeyedSubtree(
                                     key: ValueKey(
                                       'desktop-prov-${row.item.key}',
@@ -461,6 +604,7 @@ class _DesktopProvidersBodyState extends State<_DesktopProvidersBody> {
                                                       item: row.item,
                                                       settings: settings,
                                                       ordered: ordered,
+                                                      baseKeys: baseKeys,
                                                       colorScheme: cs,
                                                     )
                                                   : ReorderableDragStartListener(
@@ -470,6 +614,7 @@ class _DesktopProvidersBodyState extends State<_DesktopProvidersBody> {
                                                             item: row.item,
                                                             settings: settings,
                                                             ordered: ordered,
+                                                            baseKeys: baseKeys,
                                                             colorScheme: cs,
                                                           ),
                                                     ),
@@ -484,9 +629,8 @@ class _DesktopProvidersBodyState extends State<_DesktopProvidersBody> {
                               buildDefaultDragHandles: false,
                               padding: EdgeInsets.zero,
                               itemCount: filteredOrdered.length,
-                              onReorder: (oldIndex, newIndex) async {
+                              onReorderItem: (oldIndex, newIndex) async {
                                 if (_searchQuery.isNotEmpty) return;
-                                if (newIndex > oldIndex) newIndex -= 1;
                                 final list =
                                     List<({String name, String key})>.from(
                                       ordered,
@@ -513,6 +657,7 @@ class _DesktopProvidersBodyState extends State<_DesktopProvidersBody> {
                                   item: item,
                                   settings: settings,
                                   ordered: ordered,
+                                  baseKeys: baseKeys,
                                   colorScheme: cs,
                                 );
                                 return KeyedSubtree(
@@ -747,7 +892,7 @@ class _DesktopProviderGroupHeaderRowState
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontSize: 13.5,
-                    fontWeight: FontWeight.w700,
+                    fontWeight: AppFontWeights.emphasis,
                     color: cs.onSurface.withValues(alpha: 0.9),
                   ),
                 ),
@@ -793,6 +938,7 @@ class _DesktopProviderDetailPaneState
   final Map<String, String> _detectionErrorMessages = {};
   final Set<String> _detectingModels = {};
   final Set<String> _pendingModels = {};
+  int _providerScopedStateEpoch = 0;
 
   // Connection test state for inline dialog
   // Keep local to this file to avoid cross-file coupling
@@ -805,6 +951,15 @@ class _DesktopProviderDetailPaneState
   final TextEditingController _projectIdCtrl = TextEditingController();
   final TextEditingController _saJsonCtrl = TextEditingController();
   final TextEditingController _apiPathCtrl = TextEditingController();
+  final TextEditingController _balanceApiPathCtrl = TextEditingController();
+  final TextEditingController _balanceResultPathCtrl = TextEditingController();
+  final TextEditingController _providerSettingsNameCtrl =
+      TextEditingController();
+  final TextEditingController _proxyHostCtrl = TextEditingController();
+  final TextEditingController _proxyPortCtrl = TextEditingController();
+  final TextEditingController _proxyUserCtrl = TextEditingController();
+  final TextEditingController _proxyPassCtrl = TextEditingController();
+  bool _balanceLoading = false;
 
   void _syncCtrl(TextEditingController c, String newText) {
     final v = c.value;
@@ -825,6 +980,58 @@ class _DesktopProviderDetailPaneState
     _syncCtrl(_locationCtrl, cfg.location ?? '');
     _syncCtrl(_projectIdCtrl, cfg.projectId ?? '');
     _syncCtrl(_saJsonCtrl, cfg.serviceAccountJson ?? '');
+    _syncCtrl(
+      _balanceApiPathCtrl,
+      cfg.balanceApiPath ??
+          ProviderConfig.defaultsFor(
+            widget.providerKey,
+            displayName: widget.displayName,
+          ).balanceApiPath ??
+          '/credits',
+    );
+    _syncCtrl(
+      _balanceResultPathCtrl,
+      cfg.balanceResultPath ??
+          ProviderConfig.defaultsFor(
+            widget.providerKey,
+            displayName: widget.displayName,
+          ).balanceResultPath ??
+          'data.total_usage',
+    );
+  }
+
+  void _syncProviderSettingsControllersFromConfig(ProviderConfig cfg) {
+    _syncCtrl(_providerSettingsNameCtrl, cfg.name);
+    _syncCtrl(_proxyHostCtrl, cfg.proxyHost ?? '');
+    _syncCtrl(_proxyPortCtrl, cfg.proxyPort ?? '8080');
+    _syncCtrl(_proxyUserCtrl, cfg.proxyUsername ?? '');
+    _syncCtrl(_proxyPassCtrl, cfg.proxyPassword ?? '');
+  }
+
+  void _clearProviderScopedState({bool cancelRunningDetection = false}) {
+    if (cancelRunningDetection) {
+      _providerScopedStateEpoch += 1;
+      _isDetecting = false;
+    }
+    _selectedModels.clear();
+    _detectionResults.clear();
+    _detectionErrorMessages.clear();
+    _pendingModels.clear();
+    _detectingModels.clear();
+    _isSelectionMode = false;
+  }
+
+  @override
+  void didUpdateWidget(covariant _DesktopProviderDetailPane oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.providerKey == widget.providerKey) return;
+    _clearProviderScopedState(cancelRunningDetection: true);
+    final cfg = context.read<SettingsProvider>().getProviderConfig(
+      widget.providerKey,
+      defaultName: widget.displayName,
+    );
+    _syncControllersFromConfig(cfg);
+    _syncProviderSettingsControllersFromConfig(cfg);
   }
 
   @override
@@ -837,6 +1044,13 @@ class _DesktopProviderDetailPaneState
     _projectIdCtrl.dispose();
     _saJsonCtrl.dispose();
     _apiPathCtrl.dispose();
+    _balanceApiPathCtrl.dispose();
+    _balanceResultPathCtrl.dispose();
+    _providerSettingsNameCtrl.dispose();
+    _proxyHostCtrl.dispose();
+    _proxyPortCtrl.dispose();
+    _proxyUserCtrl.dispose();
+    _proxyPassCtrl.dispose();
     super.dispose();
   }
 
@@ -868,9 +1082,9 @@ class _DesktopProviderDetailPaneState
                     Expanded(
                       child: Text(
                         title,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 14,
-                          fontWeight: FontWeight.w700,
+                          fontWeight: AppFontWeights.emphasis,
                         ),
                       ),
                     ),
@@ -884,7 +1098,7 @@ class _DesktopProviderDetailPaneState
                 TextField(
                   controller: ctrl,
                   autofocus: true,
-                  style: const TextStyle(fontSize: 13),
+                  style: TextStyle(fontSize: 13),
                   decoration: _inputDecoration(ctx).copyWith(hintText: hint),
                   onSubmitted: (v) => Navigator.of(ctx).pop(v.trim()),
                 ),
@@ -928,6 +1142,7 @@ class _DesktopProviderDetailPaneState
     final models = List<String>.from(cfg.models);
     final allSelected =
         _selectedModels.length == models.length && models.isNotEmpty;
+    final hasFailedDetectedModels = _failedDetectedModels(models).isNotEmpty;
     final filtered = _applyFilter(models, _filterCtrl.text.trim());
     final groups = _groupModels(filtered);
 
@@ -950,17 +1165,36 @@ class _DesktopProviderDetailPaneState
                         cfg.name.isNotEmpty ? cfg.name : widget.providerKey,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 14,
-                          fontWeight: FontWeight.w700,
+                          fontWeight: AppFontWeights.emphasis,
                         ),
                       ),
                     ),
                     const SizedBox(width: 8),
                     _IconBtn(
+                      key: ValueKey(
+                        'desktop-provider-settings-${widget.providerKey}',
+                      ),
                       icon: lucide.Lucide.Settings,
                       onTap: () => _showProviderSettingsDialog(context),
                     ),
+                    if (kind == ProviderKind.openai &&
+                        cfg.balanceEnabled == true) ...[
+                      const SizedBox(width: 8),
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 120),
+                        child: ProviderBalanceBadge(
+                          providerKey: widget.providerKey,
+                          displayName: widget.displayName,
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: AppFontWeights.emphasis,
+                          ),
+                          color: cs.primary,
+                        ),
+                      ),
+                    ],
                   ],
                 ),
                 const Spacer(),
@@ -1042,7 +1276,7 @@ class _DesktopProviderDetailPaneState
                               text: 'https://dashboard.x-aio.com',
                               style: TextStyle(
                                 color: cs.primary,
-                                fontWeight: FontWeight.w700,
+                                fontWeight: AppFontWeights.emphasis,
                               ),
                               recognizer: TapGestureRecognizer()
                                 ..onTap = () async {
@@ -1105,7 +1339,7 @@ class _DesktopProviderDetailPaneState
                               text: 'https://siliconflow.cn',
                               style: TextStyle(
                                 color: cs.primary,
-                                fontWeight: FontWeight.w700,
+                                fontWeight: AppFontWeights.emphasis,
                               ),
                               recognizer: TapGestureRecognizer()
                                 ..onTap = () async {
@@ -1169,7 +1403,7 @@ class _DesktopProviderDetailPaneState
                                 text: '••••••••',
                               ),
                               readOnly: true,
-                              style: const TextStyle(fontSize: 14),
+                              style: TextStyle(fontSize: 14),
                               decoration: _inputDecoration(context),
                             ),
                           ),
@@ -1199,7 +1433,7 @@ class _DesktopProviderDetailPaneState
                         old.copyWith(apiKey: v),
                       );
                     },
-                    style: const TextStyle(fontSize: 14),
+                    style: TextStyle(fontSize: 14),
                     decoration: _inputDecoration(context).copyWith(
                       hintText: l10n.providerDetailPageApiKeyHint,
                       suffixIcon: MouseRegion(
@@ -1314,7 +1548,7 @@ class _DesktopProviderDetailPaneState
                         old.copyWith(baseUrl: v),
                       );
                     },
-                    style: const TextStyle(fontSize: 14),
+                    style: TextStyle(fontSize: 14),
                     decoration: _inputDecoration(context).copyWith(
                       hintText: ProviderConfig.defaultsFor(
                         widget.providerKey,
@@ -1380,7 +1614,7 @@ class _DesktopProviderDetailPaneState
                         old.copyWith(location: v.trim()),
                       );
                     },
-                    style: const TextStyle(fontSize: 14),
+                    style: TextStyle(fontSize: 14),
                     decoration: _inputDecoration(
                       context,
                     ).copyWith(hintText: 'us-central1'),
@@ -1442,7 +1676,7 @@ class _DesktopProviderDetailPaneState
                         old.copyWith(projectId: v),
                       );
                     },
-                    style: const TextStyle(fontSize: 14),
+                    style: TextStyle(fontSize: 14),
                     decoration: _inputDecoration(
                       context,
                     ).copyWith(hintText: 'my-project-id'),
@@ -1486,7 +1720,7 @@ class _DesktopProviderDetailPaneState
                           old.copyWith(serviceAccountJson: v),
                         );
                       },
-                      style: const TextStyle(fontSize: 14),
+                      style: TextStyle(fontSize: 14),
                       decoration: _inputDecoration(context).copyWith(
                         hintText: '{\n  "type": "service_account", ...\n}',
                       ),
@@ -1610,7 +1844,7 @@ class _DesktopProviderDetailPaneState
                         old.copyWith(chatPath: v),
                       );
                     },
-                    style: const TextStyle(fontSize: 14),
+                    style: TextStyle(fontSize: 14),
                     decoration: _inputDecoration(
                       context,
                     ).copyWith(hintText: '/chat/completions'),
@@ -1629,9 +1863,9 @@ class _DesktopProviderDetailPaneState
                           AppLocalizations.of(
                             context,
                           )!.providerDetailPageModelsTitle,
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 14,
-                            fontWeight: FontWeight.w700,
+                            fontWeight: AppFontWeights.emphasis,
                           ),
                         ),
                         const SizedBox(width: 8),
@@ -1654,7 +1888,7 @@ class _DesktopProviderDetailPaneState
                                         controller: _filterCtrl,
                                         focusNode: _searchFocus,
                                         autofocus: true,
-                                        style: const TextStyle(fontSize: 14),
+                                        style: TextStyle(fontSize: 14),
                                         decoration: _inputDecoration(context)
                                             .copyWith(
                                               hintText: l10n
@@ -1805,12 +2039,38 @@ class _DesktopProviderDetailPaneState
                         },
                       ),
                     ),
+                    const SizedBox(width: 6),
+                    Tooltip(
+                      message: l10n
+                          .providerDetailPageDeleteFailedDetectedModelsTooltip,
+                      child: _IconBtn(
+                        icon: lucide.Lucide.CircleX,
+                        color: !hasFailedDetectedModels || _isDetecting
+                            ? cs.onSurface.withValues(alpha: 0.4)
+                            : cs.error,
+                        onTap: _confirmDeleteFailedDetectedModels,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Tooltip(
+                      message:
+                          l10n.providerDetailPageDeleteSelectedModelsTooltip,
+                      child: _IconTextBtn(
+                        icon: lucide.Lucide.Trash2,
+                        label:
+                            l10n.providerDetailPageDeleteSelectedModelsButton,
+                        color: _selectedModels.isEmpty || _isDetecting
+                            ? cs.onSurface.withValues(alpha: 0.4)
+                            : cs.error,
+                        onTap: _confirmDeleteSelectedModels,
+                      ),
+                    ),
                   ] else ...[
                     if (!_isDetecting)
                       Tooltip(
-                        message: l10n.searchServicesPageTestConnectionTooltip,
+                        message: l10n.providerDetailPageMultiSelectButton,
                         child: _IconBtn(
-                          icon: lucide.Lucide.HeartPulse,
+                          icon: lucide.Lucide.CheckSquare,
                           onTap: _enterSelectionMode,
                         ),
                       )
@@ -1833,7 +2093,7 @@ class _DesktopProviderDetailPaneState
                     if (models.isNotEmpty) ...[
                       const SizedBox(width: 6),
                       Tooltip(
-                        message: '删除全部模型',
+                        message: l10n.providerDetailPageDeleteAllModelsTooltip,
                         child: _IconBtn(
                           icon: lucide.Lucide.Trash2,
                           color: cs.onSurface.withValues(alpha: 0.85),
@@ -1951,6 +2211,55 @@ class _DesktopProviderDetailPaneState
     );
   }
 
+  void _syncControllerText(TextEditingController controller, String value) {
+    if (controller.text == value) return;
+    controller.value = TextEditingValue(
+      text: value,
+      selection: TextSelection.collapsed(offset: value.length),
+    );
+  }
+
+  Future<void> _queryProviderBalance(BuildContext context) async {
+    if (_balanceLoading) return;
+    final sp = context.read<SettingsProvider>();
+    final l10n = AppLocalizations.of(context)!;
+    setState(() {
+      _balanceLoading = true;
+    });
+    try {
+      final old = sp.getProviderConfig(
+        widget.providerKey,
+        defaultName: widget.displayName,
+      );
+      final updated = old.copyWith(
+        balanceApiPath: _balanceApiPathCtrl.text.trim(),
+        balanceResultPath: _balanceResultPathCtrl.text.trim(),
+      );
+      await sp.setProviderConfig(widget.providerKey, updated);
+      ProviderBalanceBadge.clearCacheFor(widget.providerKey);
+      final value = await ProviderBalanceService.fetchBalance(updated);
+      if (!mounted) return;
+      if (context.mounted) {
+        showAppSnackBar(
+          context,
+          message: l10n.providerDetailPageBalanceResult(value),
+          type: NotificationType.success,
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+      if (context.mounted) {
+        showAppSnackBar(
+          context,
+          message: l10n.providerDetailPageBalanceError(e.toString()),
+          type: NotificationType.error,
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _balanceLoading = false);
+    }
+  }
+
   InputDecoration _proxyInputDecoration(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final cs = Theme.of(context).colorScheme;
@@ -1991,27 +2300,16 @@ class _DesktopProviderDetailPaneState
     final cs = Theme.of(context).colorScheme;
     final sp = context.read<SettingsProvider>();
     final l10n = AppLocalizations.of(context)!;
+    _syncProviderSettingsControllersFromConfig(
+      sp.getProviderConfig(widget.providerKey, defaultName: widget.displayName),
+    );
     await showDialog<void>(
       context: context,
       barrierDismissible: true,
       builder: (ctx) {
-        final cfg = sp.getProviderConfig(
-          widget.providerKey,
-          defaultName: widget.displayName,
-        );
         final GlobalKey avatarKey = GlobalKey();
-        final nameCtrl = TextEditingController(text: cfg.name);
-        final proxyHostCtrl = TextEditingController(text: cfg.proxyHost ?? '');
-        final proxyPortCtrl = TextEditingController(
-          text: cfg.proxyPort ?? '8080',
-        );
-        final proxyUserCtrl = TextEditingController(
-          text: cfg.proxyUsername ?? '',
-        );
-        final proxyPassCtrl = TextEditingController(
-          text: cfg.proxyPassword ?? '',
-        );
         return Dialog(
+          key: const ValueKey('desktop-provider-settings-dialog'),
           backgroundColor: cs.surface,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(14),
@@ -2043,10 +2341,20 @@ class _DesktopProviderDetailPaneState
                   }
                 }
 
-                syncCtrl(proxyHostCtrl, cfgNow.proxyHost ?? '');
-                syncCtrl(proxyPortCtrl, cfgNow.proxyPort ?? '8080');
-                syncCtrl(proxyUserCtrl, cfgNow.proxyUsername ?? '');
-                syncCtrl(proxyPassCtrl, cfgNow.proxyPassword ?? '');
+                final balanceDefaults = ProviderConfig.defaultsFor(
+                  widget.providerKey,
+                  displayName: widget.displayName,
+                );
+                syncCtrl(
+                  _balanceApiPathCtrl,
+                  cfgNow.balanceApiPath ?? balanceDefaults.balanceApiPath ?? '',
+                );
+                syncCtrl(
+                  _balanceResultPathCtrl,
+                  cfgNow.balanceResultPath ??
+                      balanceDefaults.balanceResultPath ??
+                      '',
+                );
                 final kindNow =
                     cfgNow.providerType ??
                     ProviderConfig.classify(
@@ -2056,12 +2364,21 @@ class _DesktopProviderDetailPaneState
                 final multiNow = cfgNow.multiKeyEnabled ?? false;
                 final respNow = cfgNow.useResponseApi ?? false;
                 final vertexNow = cfgNow.vertexAI ?? false;
+                final balanceEnabledNow = cfgNow.balanceEnabled ?? false;
                 final proxyEnabledNow = cfgNow.proxyEnabled ?? false;
                 final proxyTypeNow = ProviderConfig.resolveProxyType(
                   cfgNow.proxyType,
                 );
                 final aihubmixAppCodeEnabled =
                     cfgNow.aihubmixAppCodeEnabled ?? false;
+                final supportsClaudePromptCaching =
+                    _supportsClaudePromptCaching(cfgNow, kindNow);
+                final claudePromptCachingEnabled =
+                    cfgNow.claudePromptCachingEnabled ?? false;
+                final claudePromptCachingTtl =
+                    ProviderConfig.resolveClaudePromptCachingTtl(
+                      cfgNow.claudePromptCachingTtl,
+                    );
                 final groupsNow = spWatch.providerGroups;
                 final groupValue =
                     spWatch.groupIdForProvider(widget.providerKey) ??
@@ -2118,9 +2435,9 @@ class _DesktopProviderDetailPaneState
                                   cfgNow.name.isNotEmpty
                                       ? cfgNow.name
                                       : widget.providerKey,
-                                  style: const TextStyle(
+                                  style: TextStyle(
                                     fontSize: 13.5,
-                                    fontWeight: FontWeight.w700,
+                                    fontWeight: AppFontWeights.emphasis,
                                   ),
                                 ),
                               ),
@@ -2190,6 +2507,28 @@ class _DesktopProviderDetailPaneState
                                     },
                                   ),
                                   DesktopContextMenuItem(
+                                    icon: lucide.Lucide.Bot,
+                                    label:
+                                        l10n2.providerAvatarChooseBuiltInIcon,
+                                    onTap: () async {
+                                      await _pickProviderBuiltinIcon(
+                                        context,
+                                        widget.providerKey,
+                                      );
+                                    },
+                                  ),
+                                  DesktopContextMenuItem(
+                                    icon: lucide.Lucide.ImageDown,
+                                    label:
+                                        l10n2.providerAvatarChooseLobehubIcon,
+                                    onTap: () async {
+                                      await _inputLobehubIcon(
+                                        context,
+                                        widget.providerKey,
+                                      );
+                                    },
+                                  ),
+                                  DesktopContextMenuItem(
                                     icon: lucide.Lucide.Link,
                                     label: l10n2.sideDrawerEnterLink,
                                     onTap: () async {
@@ -2214,6 +2553,9 @@ class _DesktopProviderDetailPaneState
                               );
                             },
                             child: ProviderAvatar(
+                              key: ValueKey(
+                                'desktop-provider-settings-avatar-${widget.providerKey}',
+                              ),
                               providerKey: widget.providerKey,
                               displayName: widget.displayName,
                               size: 64,
@@ -2232,7 +2574,8 @@ class _DesktopProviderDetailPaneState
                               Focus(
                                 onFocusChange: (has) async {
                                   if (!has) {
-                                    final v = nameCtrl.text.trim();
+                                    final v = _providerSettingsNameCtrl.text
+                                        .trim();
                                     final old = spWatch.getProviderConfig(
                                       widget.providerKey,
                                       defaultName: widget.displayName,
@@ -2248,12 +2591,13 @@ class _DesktopProviderDetailPaneState
                                   }
                                 },
                                 child: TextField(
-                                  controller: nameCtrl,
-                                  style: const TextStyle(fontSize: 14),
+                                  controller: _providerSettingsNameCtrl,
+                                  style: TextStyle(fontSize: 14),
                                   decoration: _inputDecoration(ctx),
                                   textInputAction: TextInputAction.done,
                                   onSubmitted: (_) async {
-                                    final v = nameCtrl.text.trim();
+                                    final v = _providerSettingsNameCtrl.text
+                                        .trim();
                                     final old = spWatch.getProviderConfig(
                                       widget.providerKey,
                                       defaultName: widget.displayName,
@@ -2268,7 +2612,8 @@ class _DesktopProviderDetailPaneState
                                     );
                                   },
                                   onEditingComplete: () async {
-                                    final v = nameCtrl.text.trim();
+                                    final v = _providerSettingsNameCtrl.text
+                                        .trim();
                                     final old = spWatch.getProviderConfig(
                                       widget.providerKey,
                                       defaultName: widget.displayName,
@@ -2500,6 +2845,220 @@ class _DesktopProviderDetailPaneState
                               }(),
                             ),
                             const SizedBox(height: 4),
+                            if (kindNow == ProviderKind.openai) ...[
+                              row(
+                                l10n.providerDetailPageBalanceInfo,
+                                Align(
+                                  alignment: Alignment.centerRight,
+                                  child: IosSwitch(
+                                    value: balanceEnabledNow,
+                                    onChanged: (v) async {
+                                      final old = spWatch.getProviderConfig(
+                                        widget.providerKey,
+                                        defaultName: widget.displayName,
+                                      );
+                                      await spWatch.setProviderConfig(
+                                        widget.providerKey,
+                                        old.copyWith(balanceEnabled: v),
+                                      );
+                                      ProviderBalanceBadge.clearCacheFor(
+                                        widget.providerKey,
+                                      );
+                                      if (mounted) setState(() {});
+                                    },
+                                  ),
+                                ),
+                              ),
+                              AnimatedCrossFade(
+                                firstChild: const SizedBox.shrink(),
+                                secondChild: Padding(
+                                  padding: const EdgeInsets.only(top: 8),
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.stretch,
+                                    children: [
+                                      row(
+                                        l10n.providerDetailPageBalanceApiPathLabel,
+                                        TextField(
+                                          controller: _balanceApiPathCtrl,
+                                          style: TextStyle(fontSize: 13),
+                                          decoration: _proxyInputDecoration(
+                                            ctx,
+                                          ),
+                                          onChanged: (_) async {
+                                            if (_balanceApiPathCtrl
+                                                .value
+                                                .composing
+                                                .isValid) {
+                                              return;
+                                            }
+                                            final old = spWatch
+                                                .getProviderConfig(
+                                                  widget.providerKey,
+                                                  defaultName:
+                                                      widget.displayName,
+                                                );
+                                            await spWatch.setProviderConfig(
+                                              widget.providerKey,
+                                              old.copyWith(
+                                                balanceApiPath:
+                                                    _balanceApiPathCtrl.text
+                                                        .trim(),
+                                              ),
+                                            );
+                                            ProviderBalanceBadge.clearCacheFor(
+                                              widget.providerKey,
+                                            );
+                                          },
+                                        ),
+                                      ),
+                                      const SizedBox(height: 4),
+                                      row(
+                                        l10n.providerDetailPageBalanceResultPathLabel,
+                                        TextField(
+                                          controller: _balanceResultPathCtrl,
+                                          style: TextStyle(fontSize: 13),
+                                          decoration: _proxyInputDecoration(
+                                            ctx,
+                                          ),
+                                          onChanged: (_) async {
+                                            if (_balanceResultPathCtrl
+                                                .value
+                                                .composing
+                                                .isValid) {
+                                              return;
+                                            }
+                                            final old = spWatch
+                                                .getProviderConfig(
+                                                  widget.providerKey,
+                                                  defaultName:
+                                                      widget.displayName,
+                                                );
+                                            await spWatch.setProviderConfig(
+                                              widget.providerKey,
+                                              old.copyWith(
+                                                balanceResultPath:
+                                                    _balanceResultPathCtrl.text
+                                                        .trim(),
+                                              ),
+                                            );
+                                            ProviderBalanceBadge.clearCacheFor(
+                                              widget.providerKey,
+                                            );
+                                          },
+                                        ),
+                                      ),
+                                      const SizedBox(height: 4),
+                                      row(
+                                        l10n.providerDetailPageBalanceTitle,
+                                        Row(
+                                          mainAxisAlignment:
+                                              MainAxisAlignment.end,
+                                          children: [
+                                            Flexible(
+                                              child: Align(
+                                                alignment:
+                                                    Alignment.centerRight,
+                                                child: ConstrainedBox(
+                                                  constraints:
+                                                      const BoxConstraints(
+                                                        minWidth: 72,
+                                                        maxWidth: 120,
+                                                      ),
+                                                  child: ProviderBalanceBadge(
+                                                    providerKey:
+                                                        widget.providerKey,
+                                                    displayName:
+                                                        widget.displayName,
+                                                    color: cs.primary,
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
+                                            const SizedBox(width: 6),
+                                            Tooltip(
+                                              message: l10n
+                                                  .providerDetailPageBalanceResetDefaultsTooltip,
+                                              child: _IconBtn(
+                                                icon: lucide.Lucide.RotateCcw,
+                                                color: cs.onSurface.withValues(
+                                                  alpha: 0.78,
+                                                ),
+                                                onTap: () async {
+                                                  _syncControllerText(
+                                                    _balanceApiPathCtrl,
+                                                    balanceDefaults
+                                                            .balanceApiPath ??
+                                                        '',
+                                                  );
+                                                  _syncControllerText(
+                                                    _balanceResultPathCtrl,
+                                                    balanceDefaults
+                                                            .balanceResultPath ??
+                                                        '',
+                                                  );
+                                                  final old = spWatch
+                                                      .getProviderConfig(
+                                                        widget.providerKey,
+                                                        defaultName:
+                                                            widget.displayName,
+                                                      );
+                                                  await spWatch.setProviderConfig(
+                                                    widget.providerKey,
+                                                    old.copyWith(
+                                                      balanceEnabled:
+                                                          balanceDefaults
+                                                              .balanceEnabled ??
+                                                          false,
+                                                      balanceApiPath:
+                                                          _balanceApiPathCtrl
+                                                              .text
+                                                              .trim(),
+                                                      balanceResultPath:
+                                                          _balanceResultPathCtrl
+                                                              .text
+                                                              .trim(),
+                                                    ),
+                                                  );
+                                                  ProviderBalanceBadge.clearCacheFor(
+                                                    widget.providerKey,
+                                                  );
+                                                  if (mounted) setState(() {});
+                                                },
+                                              ),
+                                            ),
+                                            const SizedBox(width: 4),
+                                            Tooltip(
+                                              message: _balanceLoading
+                                                  ? l10n.providerDetailPageBalanceQuerying
+                                                  : l10n.providerDetailPageBalanceQueryButton,
+                                              child: _IconBtn(
+                                                icon: _balanceLoading
+                                                    ? lucide.Lucide.Loader
+                                                    : lucide
+                                                          .Lucide
+                                                          .RefreshCcwDot,
+                                                color: cs.primary,
+                                                onTap: () =>
+                                                    _queryProviderBalance(
+                                                      context,
+                                                    ),
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                crossFadeState: balanceEnabledNow
+                                    ? CrossFadeState.showSecond
+                                    : CrossFadeState.showFirst,
+                                duration: const Duration(milliseconds: 180),
+                                sizeCurve: Curves.easeOutCubic,
+                              ),
+                            ],
+                            const SizedBox(height: 4),
                             if (_isAihubmix(cfgNow))
                               row(
                                 l10n.providerDetailPageAihubmixAppCodeLabel,
@@ -2536,6 +3095,114 @@ class _DesktopProviderDetailPaneState
                                   ],
                                 ),
                               ),
+                            if (supportsClaudePromptCaching) ...[
+                              const SizedBox(height: 4),
+                              row(
+                                l10n.providerDetailPageClaudePromptCachingTitle,
+                                Row(
+                                  mainAxisAlignment: MainAxisAlignment.end,
+                                  children: [
+                                    Tooltip(
+                                      message: l10n
+                                          .providerDetailPageClaudePromptCachingHelp,
+                                      child: Icon(
+                                        Icons.help_outline,
+                                        size: 16,
+                                        color: cs.onSurface.withValues(
+                                          alpha: 0.6,
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    IosSwitch(
+                                      value: claudePromptCachingEnabled,
+                                      semanticLabel: l10n
+                                          .providerDetailPageClaudePromptCachingTitle,
+                                      onChanged: (v) async {
+                                        final old = spWatch.getProviderConfig(
+                                          widget.providerKey,
+                                          defaultName: widget.displayName,
+                                        );
+                                        await spWatch.setProviderConfig(
+                                          widget.providerKey,
+                                          old.copyWith(
+                                            claudePromptCachingEnabled: v,
+                                          ),
+                                        );
+                                      },
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              AnimatedCrossFade(
+                                firstChild: const SizedBox.shrink(),
+                                secondChild: Padding(
+                                  padding: const EdgeInsets.only(top: 8),
+                                  child: row(
+                                    l10n.providerDetailPageClaudePromptCachingTtlTitle,
+                                    Row(
+                                      mainAxisAlignment: MainAxisAlignment.end,
+                                      children: [
+                                        Tooltip(
+                                          message: l10n
+                                              .providerDetailPageClaudePromptCachingTtlHelp,
+                                          child: Icon(
+                                            Icons.help_outline,
+                                            size: 16,
+                                            color: cs.onSurface.withValues(
+                                              alpha: 0.6,
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        DesktopSelectDropdown<String>(
+                                          value: claudePromptCachingTtl,
+                                          minWidth: 136,
+                                          options: [
+                                            DesktopSelectOption(
+                                              value: ProviderConfig
+                                                  .claudePromptCachingTtl5m,
+                                              label: l10n
+                                                  .providerDetailPageClaudePromptCachingTtl5m,
+                                            ),
+                                            DesktopSelectOption(
+                                              value: ProviderConfig
+                                                  .claudePromptCachingTtl1h,
+                                              label: l10n
+                                                  .providerDetailPageClaudePromptCachingTtl1h,
+                                            ),
+                                          ],
+                                          triggerFillColor:
+                                              Theme.of(ctx).brightness ==
+                                                  Brightness.dark
+                                              ? Colors.white10
+                                              : const Color(0xFFF7F7F9),
+                                          onSelected: (value) async {
+                                            final old = spWatch
+                                                .getProviderConfig(
+                                                  widget.providerKey,
+                                                  defaultName:
+                                                      widget.displayName,
+                                                );
+                                            await spWatch.setProviderConfig(
+                                              widget.providerKey,
+                                              old.copyWith(
+                                                claudePromptCachingTtl: value,
+                                              ),
+                                            );
+                                          },
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                                crossFadeState: claudePromptCachingEnabled
+                                    ? CrossFadeState.showSecond
+                                    : CrossFadeState.showFirst,
+                                duration: const Duration(milliseconds: 180),
+                                sizeCurve: Curves.easeOutCubic,
+                              ),
+                            ],
                             const SizedBox(height: 4),
                             // 5) Network proxy inline
                             row(
@@ -2593,7 +3260,8 @@ class _DesktopProviderDetailPaneState
                                       Focus(
                                         onFocusChange: (has) async {
                                           if (!has) {
-                                            final v = proxyHostCtrl.text.trim();
+                                            final v = _proxyHostCtrl.text
+                                                .trim();
                                             final old = spWatch
                                                 .getProviderConfig(
                                                   widget.providerKey,
@@ -2607,13 +3275,13 @@ class _DesktopProviderDetailPaneState
                                           }
                                         },
                                         child: TextField(
-                                          controller: proxyHostCtrl,
-                                          style: const TextStyle(fontSize: 13),
+                                          controller: _proxyHostCtrl,
+                                          style: TextStyle(fontSize: 13),
                                           decoration: _proxyInputDecoration(
                                             ctx,
                                           ).copyWith(hintText: '127.0.0.1'),
                                           onChanged: (_) async {
-                                            if (proxyHostCtrl
+                                            if (_proxyHostCtrl
                                                 .value
                                                 .composing
                                                 .isValid) {
@@ -2628,7 +3296,7 @@ class _DesktopProviderDetailPaneState
                                             await spWatch.setProviderConfig(
                                               widget.providerKey,
                                               old.copyWith(
-                                                proxyHost: proxyHostCtrl.text
+                                                proxyHost: _proxyHostCtrl.text
                                                     .trim(),
                                               ),
                                             );
@@ -2642,7 +3310,8 @@ class _DesktopProviderDetailPaneState
                                       Focus(
                                         onFocusChange: (has) async {
                                           if (!has) {
-                                            final v = proxyPortCtrl.text.trim();
+                                            final v = _proxyPortCtrl.text
+                                                .trim();
                                             final old = spWatch
                                                 .getProviderConfig(
                                                   widget.providerKey,
@@ -2656,14 +3325,17 @@ class _DesktopProviderDetailPaneState
                                           }
                                         },
                                         child: TextField(
-                                          controller: proxyPortCtrl,
-                                          style: const TextStyle(fontSize: 13),
+                                          key: const ValueKey(
+                                            'desktop-provider-proxy-port-field',
+                                          ),
+                                          controller: _proxyPortCtrl,
+                                          style: TextStyle(fontSize: 13),
                                           decoration: _proxyInputDecoration(
                                             ctx,
                                           ).copyWith(hintText: '8080'),
                                           keyboardType: TextInputType.number,
                                           onChanged: (_) async {
-                                            if (proxyPortCtrl
+                                            if (_proxyPortCtrl
                                                 .value
                                                 .composing
                                                 .isValid) {
@@ -2678,7 +3350,7 @@ class _DesktopProviderDetailPaneState
                                             await spWatch.setProviderConfig(
                                               widget.providerKey,
                                               old.copyWith(
-                                                proxyPort: proxyPortCtrl.text
+                                                proxyPort: _proxyPortCtrl.text
                                                     .trim(),
                                               ),
                                             );
@@ -2692,7 +3364,8 @@ class _DesktopProviderDetailPaneState
                                       Focus(
                                         onFocusChange: (has) async {
                                           if (!has) {
-                                            final v = proxyUserCtrl.text.trim();
+                                            final v = _proxyUserCtrl.text
+                                                .trim();
                                             final old = spWatch
                                                 .getProviderConfig(
                                                   widget.providerKey,
@@ -2706,13 +3379,13 @@ class _DesktopProviderDetailPaneState
                                           }
                                         },
                                         child: TextField(
-                                          controller: proxyUserCtrl,
-                                          style: const TextStyle(fontSize: 13),
+                                          controller: _proxyUserCtrl,
+                                          style: TextStyle(fontSize: 13),
                                           decoration: _proxyInputDecoration(
                                             ctx,
                                           ),
                                           onChanged: (_) async {
-                                            if (proxyUserCtrl
+                                            if (_proxyUserCtrl
                                                 .value
                                                 .composing
                                                 .isValid) {
@@ -2727,7 +3400,7 @@ class _DesktopProviderDetailPaneState
                                             await spWatch.setProviderConfig(
                                               widget.providerKey,
                                               old.copyWith(
-                                                proxyUsername: proxyUserCtrl
+                                                proxyUsername: _proxyUserCtrl
                                                     .text
                                                     .trim(),
                                               ),
@@ -2742,7 +3415,8 @@ class _DesktopProviderDetailPaneState
                                       Focus(
                                         onFocusChange: (has) async {
                                           if (!has) {
-                                            final v = proxyPassCtrl.text.trim();
+                                            final v = _proxyPassCtrl.text
+                                                .trim();
                                             final old = spWatch
                                                 .getProviderConfig(
                                                   widget.providerKey,
@@ -2756,14 +3430,14 @@ class _DesktopProviderDetailPaneState
                                           }
                                         },
                                         child: TextField(
-                                          controller: proxyPassCtrl,
-                                          style: const TextStyle(fontSize: 13),
+                                          controller: _proxyPassCtrl,
+                                          style: TextStyle(fontSize: 13),
                                           obscureText: true,
                                           decoration: _proxyInputDecoration(
                                             ctx,
                                           ),
                                           onChanged: (_) async {
-                                            if (proxyPassCtrl
+                                            if (_proxyPassCtrl
                                                 .value
                                                 .composing
                                                 .isValid) {
@@ -2778,7 +3452,7 @@ class _DesktopProviderDetailPaneState
                                             await spWatch.setProviderConfig(
                                               widget.providerKey,
                                               old.copyWith(
-                                                proxyPassword: proxyPassCtrl
+                                                proxyPassword: _proxyPassCtrl
                                                     .text
                                                     .trim(),
                                               ),
@@ -2876,7 +3550,7 @@ class _DesktopProviderDetailPaneState
                       color: valid(value)
                           ? cs.primary
                           : cs.onSurface.withValues(alpha: 0.38),
-                      fontWeight: FontWeight.w600,
+                      fontWeight: AppFontWeights.semibold,
                     ),
                   ),
                 ),
@@ -2894,10 +3568,244 @@ class _DesktopProviderDetailPaneState
     }
   }
 
+  Future<void> _inputLobehubIcon(
+    BuildContext context,
+    String providerKey,
+  ) async {
+    final l10n = AppLocalizations.of(context)!;
+    final settings = context.read<SettingsProvider>();
+    final controller = TextEditingController();
+    String value = '';
+    final ok = await showDialog<bool>(
+      context: context,
+      barrierColor: Colors.black.withValues(alpha: 0.16),
+      builder: (ctx) {
+        final cs = Theme.of(ctx).colorScheme;
+        bool valid(String s) => s.trim().isNotEmpty;
+        return StatefulBuilder(
+          builder: (ctx2, setLocal) {
+            return Dialog(
+              key: const ValueKey('desktop-provider-lobehub-icon-dialog'),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(14),
+              ),
+              insetPadding: const EdgeInsets.symmetric(
+                horizontal: 24,
+                vertical: 24,
+              ),
+              backgroundColor: cs.surface,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 420),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    SizedBox(
+                      height: 44,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                l10n.providerAvatarLobehubDialogTitle,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontSize: 13.5,
+                                  fontWeight: AppFontWeights.emphasis,
+                                ),
+                              ),
+                            ),
+                            _IconBtn(
+                              icon: lucide.Lucide.X,
+                              onTap: () => Navigator.of(ctx).maybePop(false),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    Divider(
+                      height: 1,
+                      thickness: 0.5,
+                      color: cs.outlineVariant.withValues(alpha: 0.12),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          TextField(
+                            key: const ValueKey(
+                              'desktop-provider-lobehub-icon-field',
+                            ),
+                            controller: controller,
+                            autofocus: true,
+                            style: const TextStyle(fontSize: 13),
+                            textInputAction: TextInputAction.done,
+                            decoration: _inputDecoration(ctx2).copyWith(
+                              hintText: l10n.providerAvatarLobehubDialogHint,
+                            ),
+                            onChanged: (v) => setLocal(() => value = v),
+                            onSubmitted: (_) {
+                              if (valid(value)) Navigator.of(ctx2).pop(true);
+                            },
+                          ),
+                          const SizedBox(height: 14),
+                          Align(
+                            alignment: Alignment.centerRight,
+                            child: _DialogActionButton(
+                              icon: const Icon(lucide.Lucide.Check),
+                              label: l10n.sideDrawerSave,
+                              filled: true,
+                              onTap: valid(value)
+                                  ? () => Navigator.of(ctx2).pop(true)
+                                  : null,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+    if (ok == true) {
+      final name = controller.text.trim();
+      if (name.isNotEmpty) {
+        await settings.setProviderAvatarLobehub(providerKey, name);
+      }
+    }
+  }
+
+  Future<void> _pickProviderBuiltinIcon(
+    BuildContext context,
+    String providerKey,
+  ) async {
+    final l10n = AppLocalizations.of(context)!;
+    final cs = Theme.of(context).colorScheme;
+    final settings = context.read<SettingsProvider>();
+    final icons = BrandAssets.selectableIcons;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final cfg = settings.getProviderConfig(providerKey);
+
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          backgroundColor: cs.surface,
+          title: Text(l10n.providerAvatarIconDialogTitle),
+          content: SizedBox(
+            width: 360,
+            height: 400,
+            child: GridView.builder(
+              itemCount: icons.length,
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 5,
+                mainAxisSpacing: 8,
+                crossAxisSpacing: 8,
+                childAspectRatio: 1,
+              ),
+              itemBuilder: (ctx, i) {
+                final opt = icons[i];
+                final selected =
+                    cfg.avatarType == 'icon' && cfg.avatarValue == opt.asset;
+                final isSvg = opt.asset.endsWith('.svg');
+                final needsMono =
+                    isDark && BrandAssets.assetNeedsDarkInvert(opt.asset);
+                return Semantics(
+                  label: opt.label,
+                  child: Tooltip(
+                    message: opt.label,
+                    child: GestureDetector(
+                      onTap: () {
+                        Navigator.of(ctx).pop();
+                        Future.microtask(() async {
+                          await settings.setProviderAvatarIcon(
+                            providerKey,
+                            opt.asset,
+                          );
+                        });
+                      },
+                      child: Padding(
+                        padding: const EdgeInsets.all(4),
+                        child: Center(
+                          child: AspectRatio(
+                            aspectRatio: 1,
+                            child: Container(
+                              decoration: BoxDecoration(
+                                color: isDark
+                                    ? Colors.white10
+                                    : cs.primary.withValues(alpha: 0.1),
+                                shape: BoxShape.circle,
+                                border: selected
+                                    ? Border.all(color: cs.primary, width: 2)
+                                    : null,
+                              ),
+                              alignment: Alignment.center,
+                              child: FractionallySizedBox(
+                                widthFactor: 0.65,
+                                heightFactor: 0.65,
+                                child: isSvg
+                                    ? SvgPicture.asset(
+                                        opt.asset,
+                                        fit: BoxFit.contain,
+                                        colorFilter: needsMono
+                                            ? const ColorFilter.mode(
+                                                Colors.white,
+                                                BlendMode.srcIn,
+                                              )
+                                            : null,
+                                      )
+                                    : Image.asset(
+                                        opt.asset,
+                                        fit: BoxFit.contain,
+                                        color: needsMono ? Colors.white : null,
+                                        colorBlendMode: needsMono
+                                            ? BlendMode.srcIn
+                                            : null,
+                                      ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: Text(l10n.sideDrawerCancel),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   bool _isAihubmix(ProviderConfig cfg) {
     final base = cfg.baseUrl.toLowerCase();
     final key = cfg.id.toLowerCase();
     return key.contains('aihubmix') || base.contains('aihubmix.com');
+  }
+
+  bool _isOpenRouter(ProviderConfig cfg) {
+    final base = cfg.baseUrl.toLowerCase();
+    final key = cfg.id.toLowerCase();
+    return key.contains('openrouter') || base.contains('openrouter');
+  }
+
+  bool _supportsClaudePromptCaching(ProviderConfig cfg, ProviderKind kind) {
+    return kind == ProviderKind.claude ||
+        (kind == ProviderKind.openai && _isOpenRouter(cfg));
   }
 
   Future<void> _showMultiKeyDialog(BuildContext context) async {
@@ -2933,6 +3841,10 @@ class _DesktopProviderDetailPaneState
           final sel = await showModelSelector(
             dctx,
             limitProviderKey: widget.providerKey,
+            initialProviderKey: detectModelId == null
+                ? null
+                : widget.providerKey,
+            initialModelId: detectModelId,
           );
           if (sel != null) {
             detectModelId = sel.modelId;
@@ -3177,9 +4089,9 @@ class _DesktopProviderDetailPaneState
                                 Expanded(
                                   child: Text(
                                     l10n2.multiKeyPageEdit,
-                                    style: const TextStyle(
+                                    style: TextStyle(
                                       fontSize: 13.5,
-                                      fontWeight: FontWeight.w700,
+                                      fontWeight: AppFontWeights.emphasis,
                                     ),
                                   ),
                                 ),
@@ -3205,7 +4117,7 @@ class _DesktopProviderDetailPaneState
                               const SizedBox(height: 6),
                               TextField(
                                 controller: aliasCtrl,
-                                style: const TextStyle(fontSize: 13),
+                                style: TextStyle(fontSize: 13),
                                 decoration: _inputDecoration(cc),
                               ),
                               const SizedBox(height: 12),
@@ -3213,7 +4125,7 @@ class _DesktopProviderDetailPaneState
                               const SizedBox(height: 6),
                               TextField(
                                 controller: keyCtrl,
-                                style: const TextStyle(fontSize: 13),
+                                style: TextStyle(fontSize: 13),
                                 decoration: _inputDecoration(cc),
                               ),
                               const SizedBox(height: 12),
@@ -3221,7 +4133,7 @@ class _DesktopProviderDetailPaneState
                               const SizedBox(height: 6),
                               TextField(
                                 controller: priCtrl,
-                                style: const TextStyle(fontSize: 13),
+                                style: TextStyle(fontSize: 13),
                                 decoration: _inputDecoration(
                                   cc,
                                 ).copyWith(hintText: '1-10'),
@@ -3353,9 +4265,9 @@ class _DesktopProviderDetailPaneState
                             Expanded(
                               child: Text(
                                 l10n.multiKeyPageTitle,
-                                style: const TextStyle(
+                                style: TextStyle(
                                   fontSize: 13.5,
-                                  fontWeight: FontWeight.w700,
+                                  fontWeight: AppFontWeights.emphasis,
                                 ),
                               ),
                             ),
@@ -3416,7 +4328,7 @@ class _DesktopProviderDetailPaneState
                               style: TextStyle(
                                 fontSize: 14,
                                 color: cs.onSurface.withValues(alpha: 0.9),
-                                fontWeight: FontWeight.w600,
+                                fontWeight: AppFontWeights.semibold,
                               ),
                             ),
                           ),
@@ -3609,6 +4521,10 @@ class _DesktopProviderDetailPaneState
           final sel = await showModelSelector(
             ctx,
             limitProviderKey: widget.providerKey,
+            initialProviderKey: selectedModelId == null
+                ? null
+                : widget.providerKey,
+            initialModelId: selectedModelId,
           );
           if (sel != null) {
             selectedModelId = sel.modelId;
@@ -3686,9 +4602,9 @@ class _DesktopProviderDetailPaneState
                       Center(
                         child: Text(
                           l10n.providerDetailPageTestConnectionTitle,
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 18,
-                            fontWeight: FontWeight.w700,
+                            fontWeight: AppFontWeights.emphasis,
                           ),
                         ),
                       ),
@@ -3723,8 +4639,8 @@ class _DesktopProviderDetailPaneState
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                   textAlign: TextAlign.center,
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.w600,
+                                  style: TextStyle(
+                                    fontWeight: AppFontWeights.semibold,
                                   ),
                                 ),
                               ),
@@ -3771,8 +4687,8 @@ class _DesktopProviderDetailPaneState
                               color: color,
                               fontSize: 14,
                               fontWeight: state == _TestState.success
-                                  ? FontWeight.w700
-                                  : FontWeight.w600,
+                                  ? AppFontWeights.emphasis
+                                  : AppFontWeights.semibold,
                             ),
                           ),
                         ),
@@ -3810,10 +4726,6 @@ class _DesktopProviderDetailPaneState
     setState(() {
       _isSelectionMode = true;
       _selectedModels.clear();
-      _detectionResults.clear();
-      _detectionErrorMessages.clear();
-      _detectingModels.clear();
-      _pendingModels.clear();
     });
   }
 
@@ -3821,11 +4733,186 @@ class _DesktopProviderDetailPaneState
     setState(() {
       _isSelectionMode = false;
       _selectedModels.clear();
-      _detectionResults.clear();
-      _detectionErrorMessages.clear();
-      _detectingModels.clear();
-      _pendingModels.clear();
     });
+  }
+
+  Future<void> _clearAssistantSelectionsForModels(
+    Set<String> modelIds,
+    AssistantProvider assistantProvider,
+  ) async {
+    if (modelIds.isEmpty) return;
+    try {
+      for (final assistant in assistantProvider.assistants) {
+        if (assistant.chatModelProvider == widget.providerKey &&
+            assistant.chatModelId != null &&
+            modelIds.contains(assistant.chatModelId)) {
+          await assistantProvider.updateAssistant(
+            assistant.copyWith(clearChatModel: true),
+          );
+        }
+      }
+    } catch (e, st) {
+      FlutterLogger.log(
+        '[DesktopProviders] clear assistant model selections failed: $e\n$st',
+        tag: 'Provider',
+      );
+      assert(() {
+        debugPrint(
+          '[DesktopProviders] clear assistant model selections failed: $e',
+        );
+        return true;
+      }());
+    }
+  }
+
+  Future<void> _confirmDeleteSelectedModels() async {
+    if (_selectedModels.isEmpty || _isDetecting) return;
+    final modelsToDelete = Set<String>.from(_selectedModels);
+    final l10n = AppLocalizations.of(context)!;
+    await _confirmDeleteModels(
+      modelsToDelete,
+      l10n.providerDetailPageDeleteSelectedModelsConfirm(modelsToDelete.length),
+    );
+  }
+
+  Set<String> _failedDetectedModels(Iterable<String> models) {
+    final currentModels = models.toSet();
+    return {
+      for (final entry in _detectionResults.entries)
+        if (!entry.value && currentModels.contains(entry.key)) entry.key,
+    };
+  }
+
+  Future<void> _confirmDeleteFailedDetectedModels() async {
+    if (_isDetecting) return;
+    final sp = context.read<SettingsProvider>();
+    final cfg = sp.getProviderConfig(
+      widget.providerKey,
+      defaultName: widget.displayName,
+    );
+    final modelsToDelete = _failedDetectedModels(cfg.models);
+    if (modelsToDelete.isEmpty) return;
+    final l10n = AppLocalizations.of(context)!;
+    await _confirmDeleteModels(
+      modelsToDelete,
+      l10n.providerDetailPageDeleteFailedDetectedModelsConfirm(
+        modelsToDelete.length,
+      ),
+    );
+  }
+
+  Future<void> _confirmDeleteModels(
+    Set<String> modelsToDelete,
+    String confirmMessage,
+  ) async {
+    if (modelsToDelete.isEmpty) return;
+    final cs = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context)!;
+    final ok = await showDialog<bool>(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) => Dialog(
+        backgroundColor: cs.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 520),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        l10n.providerDetailPageConfirmDeleteTitle,
+                        style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: AppFontWeights.emphasis,
+                        ),
+                      ),
+                    ),
+                    _IconBtn(
+                      icon: lucide.Lucide.X,
+                      onTap: () => Navigator.of(ctx).maybePop(false),
+                    ),
+                  ],
+                ),
+              ),
+              Divider(
+                height: 1,
+                thickness: 0.5,
+                color: cs.outlineVariant.withValues(alpha: 0.12),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    confirmMessage,
+                    style: TextStyle(
+                      color: cs.onSurface.withValues(alpha: 0.85),
+                    ),
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    _DeskIosButton(
+                      label: l10n.providerDetailPageCancelButton,
+                      filled: false,
+                      dense: true,
+                      onTap: () => Navigator.of(ctx).maybePop(false),
+                    ),
+                    const SizedBox(width: 8),
+                    _DeskIosButton(
+                      label: l10n.providerDetailPageDeleteButton,
+                      filled: true,
+                      dense: true,
+                      onTap: () => Navigator.of(ctx).maybePop(true),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (ok != true) return;
+    if (!mounted) return;
+
+    final sp = context.read<SettingsProvider>();
+    final assistantProvider = context.read<AssistantProvider>();
+    final deletedCount = await sp.deleteModels(
+      widget.providerKey,
+      modelsToDelete,
+    );
+    await _clearAssistantSelectionsForModels(modelsToDelete, assistantProvider);
+    if (!mounted) return;
+    setState(() {
+      _selectedModels.clear();
+      _detectionResults.removeWhere((id, _) => modelsToDelete.contains(id));
+      _detectionErrorMessages.removeWhere(
+        (id, _) => modelsToDelete.contains(id),
+      );
+      _pendingModels.removeAll(modelsToDelete);
+      _detectingModels.removeAll(modelsToDelete);
+      _isSelectionMode = false;
+    });
+    if (deletedCount > 0) {
+      showAppSnackBar(
+        context,
+        message: l10n.providerDetailPageSelectedModelsDeletedSnackbar(
+          deletedCount,
+        ),
+        type: NotificationType.info,
+      );
+    }
   }
 
   Future<void> _confirmDeleteAllModels() async {
@@ -3856,9 +4943,9 @@ class _DesktopProviderDetailPaneState
                     Expanded(
                       child: Text(
                         l10n.providerDetailPageConfirmDeleteTitle,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 15,
-                          fontWeight: FontWeight.w700,
+                          fontWeight: AppFontWeights.emphasis,
                         ),
                       ),
                     ),
@@ -3913,15 +5000,18 @@ class _DesktopProviderDetailPaneState
       ),
     );
     if (ok != true) return;
-    final cleared = cfg.copyWith(models: const [], modelOverrides: const {});
-    await sp.setProviderConfig(widget.providerKey, cleared);
+    if (!mounted) return;
+    final modelsToDelete = Set<String>.from(cfg.models);
+    final assistantProvider = context.read<AssistantProvider>();
+    await sp.deleteModels(widget.providerKey, modelsToDelete);
+    await _clearAssistantSelectionsForModels(modelsToDelete, assistantProvider);
     if (!mounted) return;
     setState(() {
       _selectedModels.clear();
       _detectionResults.clear();
       _detectionErrorMessages.clear();
-      _detectingModels.clear();
       _pendingModels.clear();
+      _detectingModels.clear();
       _isSelectionMode = false;
     });
   }
@@ -3929,17 +5019,16 @@ class _DesktopProviderDetailPaneState
   Future<void> _startDetection() async {
     if (_selectedModels.isEmpty || _isDetecting) return;
 
-    final modelsToTest = List<String>.from(_selectedModels);
+    final modelsToTest = Set<String>.from(_selectedModels);
+    final detectionEpoch = _providerScopedStateEpoch;
 
     setState(() {
       _isDetecting = true;
-      _detectionResults.clear();
-      _detectionErrorMessages.clear();
-      _isSelectionMode = false;
-      _selectedModels.clear();
-      _detectingModels.clear();
+      _detectionResults.removeWhere((id, _) => modelsToTest.contains(id));
+      _detectionErrorMessages.removeWhere((id, _) => modelsToTest.contains(id));
       _pendingModels.clear();
       _pendingModels.addAll(modelsToTest);
+      _detectingModels.clear();
     });
 
     final sp = context.read<SettingsProvider>();
@@ -3957,14 +5046,14 @@ class _DesktopProviderDetailPaneState
         useStream: _detectUseStream,
       ),
       onModelStarted: (modelId) {
-        if (!mounted) return;
+        if (!mounted || detectionEpoch != _providerScopedStateEpoch) return;
         setState(() {
           _pendingModels.remove(modelId);
           _detectingModels.add(modelId);
         });
       },
       onModelSucceeded: (modelId) {
-        if (!mounted) return;
+        if (!mounted || detectionEpoch != _providerScopedStateEpoch) return;
         setState(() {
           _detectingModels.remove(modelId);
           _detectionResults[modelId] = true;
@@ -3972,7 +5061,7 @@ class _DesktopProviderDetailPaneState
         });
       },
       onModelFailed: (modelId, error) {
-        if (!mounted) return;
+        if (!mounted || detectionEpoch != _providerScopedStateEpoch) return;
         setState(() {
           _detectingModels.remove(modelId);
           _detectionResults[modelId] = false;
@@ -3981,7 +5070,7 @@ class _DesktopProviderDetailPaneState
       },
     );
 
-    if (mounted) {
+    if (mounted && detectionEpoch == _providerScopedStateEpoch) {
       setState(() {
         _isDetecting = false;
         _detectingModels.clear();
@@ -4271,7 +5360,7 @@ Widget _sectionLabel(BuildContext context, String text, {bool bold = false}) {
     style: TextStyle(
       fontSize: 13,
       color: cs.onSurface.withValues(alpha: 0.8),
-      fontWeight: bold ? FontWeight.w700 : FontWeight.w400,
+      fontWeight: bold ? AppFontWeights.emphasis : AppFontWeights.regular,
     ),
   );
 }
@@ -4294,7 +5383,11 @@ class _GreyCapsule extends StatelessWidget {
       ),
       child: Text(
         label,
-        style: TextStyle(fontSize: 11, color: fg, fontWeight: FontWeight.w600),
+        style: TextStyle(
+          fontSize: 11,
+          color: fg,
+          fontWeight: AppFontWeights.semibold,
+        ),
       ),
     );
   }
@@ -4512,7 +5605,7 @@ class _DesktopProviderGroupsDialogState
             onPressed: () => Navigator.of(ctx).pop(true),
             child: Text(
               l10n.providerGroupsDeleteConfirmOk,
-              style: const TextStyle(color: Colors.red),
+              style: TextStyle(color: Colors.red),
             ),
           ),
         ],
@@ -4536,10 +5629,32 @@ class _DesktopProviderGroupsDialogState
     final groups = sp.providerGroups;
 
     final counts = <String, int>{};
+    int ungroupedCount = 0;
     for (final k in sp.providersOrder) {
       final gid = sp.groupIdForProvider(k);
-      if (gid != null) counts[gid] = (counts[gid] ?? 0) + 1;
+      if (gid == null) {
+        ungroupedCount++;
+      } else {
+        counts[gid] = (counts[gid] ?? 0) + 1;
+      }
     }
+    final displayKeys = buildProviderGroupDisplayKeys(
+      groups: groups,
+      ungroupedIndex: sp.providerUngroupedDisplayIndex,
+    );
+    final displayRows = [
+      for (final key in displayKeys)
+        (
+          key: key,
+          title: key == SettingsProvider.providerUngroupedGroupKey
+              ? l10n.providerGroupsOther
+              : (sp.groupById(key)?.name ?? ''),
+          count: key == SettingsProvider.providerUngroupedGroupKey
+              ? ungroupedCount
+              : (counts[key] ?? 0),
+          isUngrouped: key == SettingsProvider.providerUngroupedGroupKey,
+        ),
+    ];
 
     return Dialog(
       backgroundColor: cs.surface,
@@ -4561,9 +5676,9 @@ class _DesktopProviderGroupsDialogState
                         l10n.providerGroupsManageTitle,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 13,
-                          fontWeight: FontWeight.w700,
+                          fontWeight: AppFontWeights.emphasis,
                         ),
                       ),
                     ),
@@ -4581,7 +5696,7 @@ class _DesktopProviderGroupsDialogState
               ),
             ),
             Expanded(
-              child: groups.isEmpty
+              child: displayRows.isEmpty
                   ? Center(
                       child: Text(
                         l10n.providerGroupsEmptyState,
@@ -4593,7 +5708,7 @@ class _DesktopProviderGroupsDialogState
                     )
                   : ReorderableListView.builder(
                       padding: const EdgeInsets.fromLTRB(12, 6, 12, 12),
-                      itemCount: groups.length,
+                      itemCount: displayRows.length,
                       buildDefaultDragHandles: false,
                       proxyDecorator: (child, index, animation) {
                         return ScaleTransition(
@@ -4604,31 +5719,37 @@ class _DesktopProviderGroupsDialogState
                           child: child,
                         );
                       },
-                      onReorder: (oldIndex, newIndex) async {
-                        if (newIndex > oldIndex) newIndex -= 1;
+                      onReorderItem: (oldIndex, newIndex) async {
                         await context
                             .read<SettingsProvider>()
-                            .reorderProviderGroups(oldIndex, newIndex);
+                            .reorderProviderGroupsWithUngrouped(
+                              oldIndex,
+                              newIndex,
+                            );
                       },
                       itemBuilder: (ctx, i) {
-                        final g = groups[i];
-                        final count = counts[g.id] ?? 0;
+                        final row = displayRows[i];
                         return KeyedSubtree(
-                          key: ValueKey('desktop-provider-group-${g.id}'),
+                          key: ValueKey('desktop-provider-group-${row.key}'),
                           child: Padding(
                             padding: const EdgeInsets.only(bottom: 10),
                             child: _DesktopProviderGroupCard(
-                              title: g.name,
-                              count: count,
-                              onEdit: () => unawaited(
-                                _renameGroup(
-                                  context,
-                                  groupId: g.id,
-                                  oldName: g.name,
-                                ),
-                              ),
-                              onDelete: () =>
-                                  unawaited(_deleteGroup(context, g.id)),
+                              title: row.title,
+                              count: row.count,
+                              onEdit: row.isUngrouped
+                                  ? null
+                                  : () => unawaited(
+                                      _renameGroup(
+                                        context,
+                                        groupId: row.key,
+                                        oldName: row.title,
+                                      ),
+                                    ),
+                              onDelete: row.isUngrouped
+                                  ? null
+                                  : () => unawaited(
+                                      _deleteGroup(context, row.key),
+                                    ),
                               dragHandle: ReorderableDragStartListener(
                                 index: i,
                                 child: const _DesktopDragHandle(),
@@ -4650,15 +5771,15 @@ class _DesktopProviderGroupCard extends StatelessWidget {
   const _DesktopProviderGroupCard({
     required this.title,
     required this.count,
-    required this.onEdit,
-    required this.onDelete,
+    this.onEdit,
+    this.onDelete,
     required this.dragHandle,
   });
 
   final String title;
   final int count;
-  final VoidCallback onEdit;
-  final VoidCallback onDelete;
+  final VoidCallback? onEdit;
+  final VoidCallback? onDelete;
   final Widget dragHandle;
 
   @override
@@ -4669,6 +5790,8 @@ class _DesktopProviderGroupCard extends StatelessWidget {
     final borderColor = cs.outlineVariant.withValues(
       alpha: isDark ? 0.12 : 0.10,
     );
+    final editAction = onEdit;
+    final deleteAction = onDelete;
     return Container(
       decoration: BoxDecoration(
         color: bg,
@@ -4683,18 +5806,25 @@ class _DesktopProviderGroupCard extends StatelessWidget {
               title,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+              style: TextStyle(
+                fontSize: 15,
+                fontWeight: AppFontWeights.semibold,
+              ),
             ),
           ),
           _DesktopCountPill(count: count),
-          const SizedBox(width: 10),
-          _IconBtn(icon: lucide.Lucide.Pencil, onTap: onEdit),
-          const SizedBox(width: 4),
-          _IconBtn(
-            icon: lucide.Lucide.Trash2,
-            color: cs.error,
-            onTap: onDelete,
-          ),
+          if (editAction != null) ...[
+            const SizedBox(width: 10),
+            _IconBtn(icon: lucide.Lucide.Pencil, onTap: editAction),
+          ],
+          if (deleteAction != null) ...[
+            const SizedBox(width: 4),
+            _IconBtn(
+              icon: lucide.Lucide.Trash2,
+              color: cs.error,
+              onTap: deleteAction,
+            ),
+          ],
           const SizedBox(width: 4),
           dragHandle,
         ],
@@ -4722,7 +5852,7 @@ class _DesktopCountPill extends StatelessWidget {
         style: TextStyle(
           fontSize: 12,
           color: cs.primary,
-          fontWeight: FontWeight.w700,
+          fontWeight: AppFontWeights.emphasis,
         ),
       ),
     );
@@ -4893,9 +6023,9 @@ class _DesktopProviderShareDialogState
                   Expanded(
                     child: Text(
                       l10n.shareProviderSheetTitle,
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 14,
-                        fontWeight: FontWeight.w700,
+                        fontWeight: AppFontWeights.emphasis,
                       ),
                     ),
                   ),
@@ -4956,7 +6086,7 @@ class _DesktopProviderShareDialogState
                   child: SingleChildScrollView(
                     child: SelectableText(
                       _code,
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 13.5,
                         height: 1.35,
                         fontFamily: 'monospace',
@@ -5075,7 +6205,7 @@ class _DialogActionButtonState extends State<_DialogActionButton> {
                   style: TextStyle(
                     color: enabled ? fg : fg.withValues(alpha: 0.5),
                     fontSize: 13.5,
-                    fontWeight: FontWeight.w600,
+                    fontWeight: AppFontWeights.semibold,
                   ),
                 ),
               ],
@@ -5102,7 +6232,7 @@ class _BrandCircle extends StatelessWidget {
         name.isNotEmpty ? name.characters.first.toUpperCase() : '?',
         style: TextStyle(
           color: cs.primary,
-          fontWeight: FontWeight.w800,
+          fontWeight: AppFontWeights.heavy,
           fontSize: size * 0.45,
         ),
       );
@@ -5227,9 +6357,9 @@ class _ProviderListRowState extends State<_ProviderListRow> {
                   widget.name,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: 14,
-                    fontWeight: FontWeight.w600,
+                    fontWeight: AppFontWeights.semibold,
                   ),
                 ),
               ),
@@ -5251,7 +6381,7 @@ class _ProviderListRowState extends State<_ProviderListRow> {
                   style: TextStyle(
                     fontSize: 11,
                     color: widget.enabled ? Colors.green : Colors.orange,
-                    fontWeight: FontWeight.w700,
+                    fontWeight: AppFontWeights.emphasis,
                   ),
                 ),
               ),
@@ -5324,7 +6454,7 @@ class _AddFullWidthButtonState extends State<_AddFullWidthButton> {
                   widget.label,
                   style: TextStyle(
                     color: cs.primary,
-                    fontWeight: FontWeight.w700,
+                    fontWeight: AppFontWeights.emphasis,
                   ),
                 ),
               ],
@@ -5446,9 +6576,9 @@ class _DesktopKeyRow extends StatelessWidget {
                   label,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: 15,
-                    fontWeight: FontWeight.w600,
+                    fontWeight: AppFontWeights.semibold,
                   ),
                 ),
               ),
@@ -5513,7 +6643,7 @@ class _ModelGroupAccordion extends StatefulWidget {
     this.onSelectionChanged,
     this.detectionResults = const {},
     this.detectionErrorMessages = const {},
-    this.detectingModels = const {},
+    required this.detectingModels,
     this.pendingModels = const {},
   });
   final String group;
@@ -5584,9 +6714,9 @@ class _ModelGroupAccordionState extends State<_ModelGroupAccordion> {
                       Expanded(
                         child: Text(
                           widget.group,
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 13.5,
-                            fontWeight: FontWeight.w700,
+                            fontWeight: AppFontWeights.emphasis,
                           ),
                         ),
                       ),
@@ -5710,6 +6840,9 @@ class _ModelRow extends StatelessWidget {
               IosCheckbox(
                 value: isSelected,
                 onChanged: (value) => onSelectionChanged?.call(value),
+                size: 18,
+                hitTestSize: 26,
+                borderWidth: 1.6,
               ),
               const SizedBox(width: 10),
             ],
@@ -5720,7 +6853,7 @@ class _ModelRow extends StatelessWidget {
                 displayName,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 13.5),
+                style: TextStyle(fontSize: 13.5),
               ),
             ),
             const SizedBox(width: 8),
@@ -5870,3 +7003,4 @@ class _CardPressState extends State<_CardPress> {
 // Removed embedded default model card; now in setting/default_model_pane.dart
 
 // ===== Display Settings Body =====
+

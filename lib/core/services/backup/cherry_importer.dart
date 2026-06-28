@@ -10,6 +10,7 @@ import '../../models/conversation.dart';
 import '../../providers/settings_provider.dart';
 import '../chat/chat_service.dart';
 import '../../../utils/app_directories.dart';
+import 'cherry_direct_backup_reader.dart';
 
 class CherryImportResult {
   final int providers;
@@ -109,10 +110,17 @@ class CherryImporter {
         if (t is Map && t['id'] != null) {
           final id = t['id'].toString();
           topicMeta[id] = t.map((k, v) => MapEntry(k.toString(), v));
-          // Ensure assistantId is present (avoid null index warning by using local var)
           final tm = topicMeta[id]!;
-          final dynamic cand = t['assistantId'] ?? a['id'];
-          if (cand != null) tm['assistantId'] = cand.toString();
+          final parentAssistantId = (a['id'] ?? '').toString();
+          final topicAssistantId = (t['assistantId'] ?? '').toString();
+          // Cherry may keep a stale topic.assistantId; the parent assistant's
+          // topic list is the reliable ownership source.
+          final ownerAssistantId = parentAssistantId.isNotEmpty
+              ? parentAssistantId
+              : topicAssistantId;
+          if (ownerAssistantId.isNotEmpty) {
+            tm['assistantId'] = ownerAssistantId;
+          }
         }
       }
     }
@@ -331,6 +339,8 @@ class CherryImporter {
           // skip non-text entries
         }
       }
+      final directBackup = CherryDirectBackupReader.readArchive(archive);
+      if (directBackup != null) return directBackup;
     } catch (_) {}
 
     // 3) Try GZIP (some .bak may be gzip-compressed JSON)
@@ -558,7 +568,6 @@ class CherryImporter {
         'messageTemplate': '{{ message }}',
         'mcpServerIds': const <String>[],
         'background': null,
-        'deletable': true,
         'customHeaders': const <Map<String, String>>[],
         'customBody': const <Map<String, String>>[],
         'enableMemory': false,
@@ -605,6 +614,25 @@ class CherryImporter {
     final merged = byId.values.toList();
     await prefs.setString(_assistantsKey, jsonEncode(merged));
     return out.length;
+  }
+
+  /// Decode a DOS date/time packed value (from ZIP entry's lastModTime) into
+  /// a [DateTime]. Returns null when the date portion is zero (unset).
+  static DateTime? _decodeDosDateTime(int packed) {
+    final dosDate = packed >> 16;
+    final dosTime = packed & 0xFFFF;
+    if (dosDate == 0) return null;
+    final year = ((dosDate >> 9) & 0x7f) + 1980;
+    final month = (dosDate >> 5) & 0x0f;
+    final day = dosDate & 0x1f;
+    final hour = (dosTime >> 11) & 0x1f;
+    final minute = (dosTime >> 5) & 0x3f;
+    final second = (dosTime & 0x1f) * 2;
+    try {
+      return DateTime(year, month, day, hour, minute, second);
+    } catch (_) {
+      return null;
+    }
   }
 
   static Future<Map<String, String>> _materializeFiles(
@@ -779,6 +807,12 @@ class CherryImporter {
               await File(outPath).writeAsBytes(bytes);
               result[id] = outPath;
               done = true;
+              final dt = _decodeDosDateTime(entry.lastModTime);
+              if (dt != null) {
+                try {
+                  await File(outPath).setLastModified(dt);
+                } catch (_) {}
+              }
             }
             if (!done &&
                 diskFilesIndexByRel != null &&
@@ -788,6 +822,11 @@ class CherryImporter {
               await File(outPath).writeAsBytes(bytes);
               result[id] = outPath;
               done = true;
+              try {
+                await File(
+                  outPath,
+                ).setLastModified(await File(src).lastModified());
+              } catch (_) {}
             }
             if (done) break;
           }
@@ -815,6 +854,12 @@ class CherryImporter {
             await File(outPath).writeAsBytes(bytes);
             result[id] = outPath;
             done = true;
+            final dt = _decodeDosDateTime(entry.lastModTime);
+            if (dt != null) {
+              try {
+                await File(outPath).setLastModified(dt);
+              } catch (_) {}
+            }
           }
           if (!done &&
               diskFilesIndexByBase != null &&
@@ -824,6 +869,11 @@ class CherryImporter {
             await File(outPath).writeAsBytes(bytes);
             result[id] = outPath;
             done = true;
+            try {
+              await File(
+                outPath,
+              ).setLastModified(await File(src).lastModified());
+            } catch (_) {}
           }
           if (done) break;
         }
@@ -845,6 +895,12 @@ class CherryImporter {
           final bytes = entry.content as List<int>;
           await File(outPath).writeAsBytes(bytes);
           result[id] = outPath;
+          final dt = _decodeDosDateTime(entry.lastModTime);
+          if (dt != null) {
+            try {
+              await File(outPath).setLastModified(dt);
+            } catch (_) {}
+          }
           continue;
         }
         if (filesIndexByBase != null && filesIndexByBase.containsKey(idPlus)) {
@@ -852,6 +908,12 @@ class CherryImporter {
           final bytes = entry.content as List<int>;
           await File(outPath).writeAsBytes(bytes);
           result[id] = outPath;
+          final dt = _decodeDosDateTime(entry.lastModTime);
+          if (dt != null) {
+            try {
+              await File(outPath).setLastModified(dt);
+            } catch (_) {}
+          }
           continue;
         }
         if (diskFilesIndexById != null && diskFilesIndexById.containsKey(id)) {
@@ -859,6 +921,9 @@ class CherryImporter {
           final bytes = await File(src).readAsBytes();
           await File(outPath).writeAsBytes(bytes);
           result[id] = outPath;
+          try {
+            await File(outPath).setLastModified(await File(src).lastModified());
+          } catch (_) {}
           continue;
         }
         if (diskFilesIndexByBase != null &&
@@ -867,6 +932,9 @@ class CherryImporter {
           final bytes = await File(src).readAsBytes();
           await File(outPath).writeAsBytes(bytes);
           result[id] = outPath;
+          try {
+            await File(outPath).setLastModified(await File(src).lastModified());
+          } catch (_) {}
           continue;
         }
       } catch (_) {}
@@ -906,9 +974,9 @@ class CherryImporter {
     int msgCount = 0;
     int extraSaved = 0; // number of files saved from base64/data urls
 
-    for (final entry in topicMessages.entries) {
-      final topicId = entry.key;
-      final msgsRaw = entry.value;
+    final topicIds = <String>{...topicMeta.keys, ...topicMessages.keys};
+    for (final topicId in topicIds) {
+      final msgsRaw = topicMessages[topicId] ?? const <Map<String, dynamic>>[];
       final meta = topicMeta[topicId] ?? const <String, dynamic>{};
       final title = (meta['name'] ?? 'Imported').toString();
       final pinned = meta['pinned'] as bool? ?? false;

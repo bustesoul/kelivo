@@ -35,12 +35,16 @@ Future<_ParsedTextAndImages> _parseTextAndImages(
   String raw, {
   required bool allowRemoteImages,
   required bool allowLocalImages,
+  bool allowDataImages = true,
   bool keepRemoteMarkdownText = true,
+  bool keepDisallowedImageText = true,
 }) => ChatApiService._parseTextAndImages(
   raw,
   allowRemoteImages: allowRemoteImages,
   allowLocalImages: allowLocalImages,
+  allowDataImages: allowDataImages,
   keepRemoteMarkdownText: keepRemoteMarkdownText,
+  keepDisallowedImageText: keepDisallowedImageText,
 );
 
 Future<String> _encodeBase64File(String path, {bool withPrefix = false}) =>
@@ -49,6 +53,27 @@ Future<String> _encodeBase64File(String path, {bool withPrefix = false}) =>
 bool _isOff(int? budget) => ChatApiService._isOff(budget);
 
 String _effortForBudget(int? budget) => ChatApiService._effortForBudget(budget);
+
+bool _isClaudeReasoningEnabled(int? budget) =>
+    ChatApiService._isClaudeReasoningEnabled(budget);
+
+Map<String, dynamic>? _claudeThinkingConfig(
+  String modelId,
+  int? budget, {
+  ProviderConfig? config,
+}) => ChatApiService._claudeThinkingConfig(modelId, budget, config: config);
+
+Map<String, dynamic>? _claudeOutputConfig(
+  String modelId,
+  int? budget, {
+  ProviderConfig? config,
+}) => ChatApiService._claudeOutputConfig(modelId, budget, config: config);
+
+bool _claudeShouldOmitSamplingParams(String modelId, int? budget) =>
+    ChatApiService._claudeShouldOmitSamplingParams(modelId, budget);
+
+double? _claudeCompatibleTopP(String modelId, int? budget, double? topP) =>
+    ChatApiService._claudeCompatibleTopP(modelId, budget, topP);
 
 Map<String, dynamic> _cleanSchemaForGemini(Map<String, dynamic> schema) =>
     ChatApiService._cleanSchemaForGemini(schema);

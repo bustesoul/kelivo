@@ -21,6 +21,7 @@ import '../../../shared/widgets/ios_checkbox.dart';
 import '../widgets/provider_avatar.dart';
 import '../widgets/provider_group_select_sheet.dart';
 import '../../../utils/provider_grouping_logic.dart';
+import '../../../theme/app_font_weights.dart';
 
 class ProvidersPage extends StatefulWidget {
   const ProvidersPage({super.key});
@@ -30,16 +31,47 @@ class ProvidersPage extends StatefulWidget {
 }
 
 class _ProvidersPageState extends State<ProvidersPage> {
+  static const Duration _groupReorderRestoreDelay = Duration(milliseconds: 300);
+
   final Set<String> _settleKeys = {};
   bool _selectMode = false;
   final Set<String> _selected = {};
   final TextEditingController _searchController = TextEditingController();
   String _searchQuery = '';
+  Timer? _groupReorderRestoreTimer;
+  bool _temporarilyCollapseGroupedProviders = false;
+  bool _groupHeaderDragActive = false;
+  bool _groupHeaderReorderInFlight = false;
+  bool _groupHeaderRestorePending = false;
 
   @override
   void dispose() {
+    _groupReorderRestoreTimer?.cancel();
     _searchController.dispose();
     super.dispose();
+  }
+
+  bool _effectiveGroupCollapsed(SettingsProvider settings, String groupKey) =>
+      _temporarilyCollapseGroupedProviders ||
+      settings.isGroupCollapsed(groupKey);
+
+  void _startTemporaryGroupCollapse({bool lockReorder = false}) {
+    _groupReorderRestoreTimer?.cancel();
+    setState(() {
+      _temporarilyCollapseGroupedProviders = true;
+      _groupHeaderRestorePending = lockReorder;
+    });
+  }
+
+  void _scheduleTemporaryGroupRestore() {
+    _groupReorderRestoreTimer?.cancel();
+    _groupReorderRestoreTimer = Timer(_groupReorderRestoreDelay, () {
+      if (!mounted) return;
+      setState(() {
+        _temporarilyCollapseGroupedProviders = false;
+        _groupHeaderRestorePending = false;
+      });
+    });
   }
 
   Future<void> _handleAddProvider() async {
@@ -108,6 +140,8 @@ class _ProvidersPageState extends State<ProvidersPage> {
             l10n: l10n,
             settings: settings,
             items: items,
+            isGroupCollapsed: (groupKey) =>
+                _effectiveGroupCollapsed(settings, groupKey),
             normalizedQuery: _searchQuery,
           )
         : const <_ProviderGroupingRowVM>[];
@@ -210,7 +244,6 @@ class _ProvidersPageState extends State<ProvidersPage> {
                         },
                         onReorder: (oldIndex, newIndex) async {
                           if (_searchQuery.isNotEmpty || _selectMode) return;
-                          if (newIndex > oldIndex) newIndex -= 1;
                           final moved = items[oldIndex];
                           final mut = List<_Provider>.of(items);
                           final item = mut.removeAt(oldIndex);
@@ -232,8 +265,15 @@ class _ProvidersPageState extends State<ProvidersPage> {
                         rows: groupingRows,
                         selectMode: _selectMode,
                         searchActive: _searchQuery.isNotEmpty,
+                        freezeContainerHeight:
+                            _groupHeaderDragActive ||
+                            _temporarilyCollapseGroupedProviders,
+                        persistedIsGroupCollapsed: settings.isGroupCollapsed,
                         selectedKeys: _selected,
-                        reorderEnabled: !_selectMode && _searchQuery.isEmpty,
+                        reorderEnabled:
+                            !_selectMode &&
+                            _searchQuery.isEmpty &&
+                            !_groupHeaderRestorePending,
                         onToggleSelect: (key) {
                           setState(() {
                             if (_selected.contains(key)) {
@@ -258,6 +298,63 @@ class _ProvidersPageState extends State<ProvidersPage> {
                                   groupKey: r.groupKey,
                                 ),
                           ];
+
+                          if (logicRows[oldIndex] is ProviderGroupingHeaderVM) {
+                            _groupHeaderReorderInFlight = true;
+                            final intent = analyzeProviderGroupingHeaderReorder(
+                              rows: logicRows,
+                              oldIndex: oldIndex,
+                              newIndex: newIndex,
+                            );
+                            if (intent == null) {
+                              _groupHeaderReorderInFlight = false;
+                              return;
+                            }
+
+                            final visibleHeaderKeys = [
+                              for (final row in groupingRows)
+                                if (row is _ProviderGroupingHeaderVM)
+                                  row.groupKey,
+                            ];
+                            final fullDisplayKeys =
+                                buildProviderGroupDisplayKeys(
+                                  groups: sp.providerGroups,
+                                  ungroupedIndex:
+                                      sp.providerUngroupedDisplayIndex,
+                                );
+                            final oldActualIndex = fullDisplayKeys.indexOf(
+                              intent.groupKey,
+                            );
+                            if (oldActualIndex < 0) {
+                              _groupHeaderReorderInFlight = false;
+                              return;
+                            }
+
+                            final targetInsertIndex =
+                                mapVisibleGroupTargetToActualInsertIndex(
+                                  fullDisplayKeys: fullDisplayKeys,
+                                  visibleHeaderKeys: visibleHeaderKeys,
+                                  movedGroupKey: intent.groupKey,
+                                  targetVisibleIndex: intent.targetDisplayIndex,
+                                );
+                            final rawNewIndex =
+                                targetInsertIndex > oldActualIndex
+                                ? targetInsertIndex + 1
+                                : targetInsertIndex;
+
+                            _startTemporaryGroupCollapse(lockReorder: true);
+                            try {
+                              await sp.reorderProviderGroupsWithUngrouped(
+                                oldActualIndex,
+                                rawNewIndex,
+                              );
+                            } finally {
+                              _groupHeaderDragActive = false;
+                              _groupHeaderReorderInFlight = false;
+                              _scheduleTemporaryGroupRestore();
+                            }
+                            return;
+                          }
 
                           final analysis = analyzeProviderGroupingReorder(
                             rows: logicRows,
@@ -299,6 +396,24 @@ class _ProvidersPageState extends State<ProvidersPage> {
                               () => _settleKeys.remove(intent.providerKey),
                             );
                           });
+                        },
+                        onReorderStart: (index) {
+                          if (index < 0 || index >= groupingRows.length) return;
+                          if (groupingRows[index]
+                              is! _ProviderGroupingHeaderVM) {
+                            return;
+                          }
+                          _groupHeaderDragActive = true;
+                          _groupHeaderReorderInFlight = false;
+                          _startTemporaryGroupCollapse();
+                        },
+                        onReorderEnd: (_) {
+                          if (!_groupHeaderDragActive ||
+                              _groupHeaderReorderInFlight) {
+                            return;
+                          }
+                          _groupHeaderDragActive = false;
+                          _scheduleTemporaryGroupRestore();
                         },
                         settlingKeys: _settleKeys,
                       ),
@@ -389,6 +504,7 @@ class _ProvidersPageState extends State<ProvidersPage> {
     required AppLocalizations l10n,
     required SettingsProvider settings,
     required List<_Provider> items,
+    required bool Function(String groupKey) isGroupCollapsed,
     String normalizedQuery = '',
   }) {
     final ungroupedKey = SettingsProvider.providerUngroupedGroupKey;
@@ -421,40 +537,30 @@ class _ProvidersPageState extends State<ProvidersPage> {
       ];
     }
 
-    for (final g in groups) {
-      final list = providersForGroup(g.id, g.name);
+    final displayKeys = buildProviderGroupDisplayKeys(
+      groups: groups,
+      ungroupedIndex: settings.providerUngroupedDisplayIndex,
+    );
+
+    for (final groupKey in displayKeys) {
+      final isUngrouped = groupKey == ungroupedKey;
+      final title = isUngrouped
+          ? l10n.providerGroupsOther
+          : groupById[groupKey]?.name;
+      if (title == null) continue;
+      final list = providersForGroup(groupKey, title);
       if (list.isEmpty) continue; // hide empty groups on list page
-      final collapsed = searching ? false : settings.isGroupCollapsed(g.id);
+      final collapsed = searching ? false : isGroupCollapsed(groupKey);
       rows.add(
         _ProviderGroupingHeaderVM(
-          groupKey: g.id,
-          title: g.name,
+          groupKey: groupKey,
+          title: title,
           count: list.length,
           collapsed: collapsed,
         ),
       );
       for (final p in list) {
-        rows.add(_ProviderGroupingProviderVM(provider: p, groupKey: g.id));
-      }
-    }
-
-    final ungrouped = providersForGroup(ungroupedKey, l10n.providerGroupsOther);
-    if (ungrouped.isNotEmpty) {
-      final collapsed = searching
-          ? false
-          : settings.isGroupCollapsed(ungroupedKey);
-      rows.add(
-        _ProviderGroupingHeaderVM(
-          groupKey: ungroupedKey,
-          title: l10n.providerGroupsOther,
-          count: ungrouped.length,
-          collapsed: collapsed,
-        ),
-      );
-      for (final p in ungrouped) {
-        rows.add(
-          _ProviderGroupingProviderVM(provider: p, groupKey: ungroupedKey),
-        );
+        rows.add(_ProviderGroupingProviderVM(provider: p, groupKey: groupKey));
       }
     }
     return rows;
@@ -553,7 +659,7 @@ class _ProvidersPageState extends State<ProvidersPage> {
             onPressed: () => Navigator.of(ctx).pop(true),
             child: Text(
               l10n.providerDetailPageDeleteButton,
-              style: const TextStyle(color: Colors.red),
+              style: TextStyle(color: Colors.red),
             ),
           ),
         ],
@@ -697,7 +803,7 @@ class _ProvidersList extends StatelessWidget {
                 bottom: reachesBottom ? bottomGapIfFlush : 4,
               ),
               itemCount: items.length,
-              onReorder: reorderEnabled ? onReorder : (_, __) {},
+              onReorderItem: reorderEnabled ? onReorder : (_, __) {},
               buildDefaultDragHandles: false,
               proxyDecorator: (child, index, animation) => Opacity(
                 opacity: 0.95,
@@ -734,9 +840,13 @@ class _GroupedProvidersList extends StatelessWidget {
   const _GroupedProvidersList({
     required this.rows,
     required this.onReorder,
+    required this.onReorderStart,
+    required this.onReorderEnd,
     required this.settlingKeys,
     required this.selectMode,
     required this.searchActive,
+    required this.freezeContainerHeight,
+    required this.persistedIsGroupCollapsed,
     required this.reorderEnabled,
     required this.selectedKeys,
     required this.onToggleSelect,
@@ -744,9 +854,13 @@ class _GroupedProvidersList extends StatelessWidget {
 
   final List<_ProviderGroupingRowVM> rows;
   final void Function(int oldIndex, int newIndex) onReorder;
+  final void Function(int index) onReorderStart;
+  final void Function(int index) onReorderEnd;
   final Set<String> settlingKeys;
   final bool selectMode;
   final bool searchActive;
+  final bool freezeContainerHeight;
+  final bool Function(String groupKey) persistedIsGroupCollapsed;
   final bool reorderEnabled;
   final Set<String> selectedKeys;
   final void Function(String key) onToggleSelect;
@@ -796,7 +910,9 @@ class _GroupedProvidersList extends StatelessWidget {
                 continue;
               }
               if (r is _ProviderGroupingProviderVM) {
-                final collapsed = collapsedByGroupKey[r.groupKey] ?? false;
+                final collapsed = freezeContainerHeight
+                    ? persistedIsGroupCollapsed(r.groupKey)
+                    : (collapsedByGroupKey[r.groupKey] ?? false);
                 if (collapsed) continue;
                 baseContentH += rowH;
                 final next = (i + 1 < rows.length) ? rows[i + 1] : null;
@@ -839,7 +955,9 @@ class _GroupedProvidersList extends StatelessWidget {
                 bottom: reachesBottom ? bottomGapIfFlush : 4,
               ),
               itemCount: rows.length,
-              onReorder: reorderEnabled ? onReorder : (_, __) {},
+              onReorderItem: reorderEnabled ? onReorder : (_, __) {},
+              onReorderStart: reorderEnabled ? onReorderStart : null,
+              onReorderEnd: reorderEnabled ? onReorderEnd : null,
               buildDefaultDragHandles: false,
               proxyDecorator: (child, index, animation) => Opacity(
                 opacity: 0.95,
@@ -848,15 +966,22 @@ class _GroupedProvidersList extends StatelessWidget {
               itemBuilder: (context, index) {
                 final row = rows[index];
                 if (row is _ProviderGroupingHeaderVM) {
+                  Widget header = _ProviderGroupHeaderRow(
+                    groupKey: row.groupKey,
+                    title: row.title,
+                    count: row.count,
+                    collapsed: row.collapsed,
+                    canToggleCollapse: !searchActive,
+                  );
+                  if (reorderEnabled) {
+                    header = ReorderableDelayedDragStartListener(
+                      index: index,
+                      child: header,
+                    );
+                  }
                   return KeyedSubtree(
                     key: ValueKey('provider-group-header-${row.groupKey}'),
-                    child: _ProviderGroupHeaderRow(
-                      groupKey: row.groupKey,
-                      title: row.title,
-                      count: row.count,
-                      collapsed: row.collapsed,
-                      canToggleCollapse: !searchActive,
-                    ),
+                    child: header,
                   );
                 }
                 if (row is _ProviderGroupingProviderVM) {
@@ -1046,7 +1171,7 @@ class _ProviderGroupHeaderRow extends StatelessWidget {
                   style: TextStyle(
                     fontSize: 13.5,
                     color: color,
-                    fontWeight: FontWeight.w700,
+                    fontWeight: AppFontWeights.emphasis,
                   ),
                 ),
               ),
@@ -1169,7 +1294,7 @@ class _ProviderRow extends StatelessWidget {
                         style: TextStyle(
                           fontSize: 15,
                           color: color,
-                          fontWeight: FontWeight.w600,
+                          fontWeight: AppFontWeights.semibold,
                         ),
                       ),
                     ),
@@ -1462,9 +1587,9 @@ Future<void> _showMultiExportSheet(
               Center(
                 child: Text(
                   l10n.providersPageExportSelectedTitle(keys.length),
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: 18,
-                    fontWeight: FontWeight.w600,
+                    fontWeight: AppFontWeights.semibold,
                   ),
                 ),
               ),
@@ -1503,7 +1628,7 @@ Future<void> _showMultiExportSheet(
                     text,
                     maxLines: 7,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 13.5, height: 1.35),
+                    style: TextStyle(fontSize: 13.5, height: 1.35),
                   ),
                 ),
               ),

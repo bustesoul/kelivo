@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart';
 import '../../providers/settings_provider.dart';
 import '../../providers/model_provider.dart';
 import '../../models/token_usage.dart';
@@ -26,16 +27,46 @@ import '../../utils/multimodal_input_utils.dart';
 part 'chat_api_service_shims.dart';
 part 'providers/openai_common.dart';
 part 'providers/openai_chat_completions.dart';
+part 'providers/openai_images.dart';
 part 'providers/openai_responses.dart';
 part 'providers/google_common.dart';
 part 'providers/google_gemini.dart';
 part 'providers/google_vertex.dart';
 part 'providers/claude_official.dart';
 
+typedef ToolCallHandler =
+    Future<String> Function(
+      String name,
+      Map<String, dynamic> args, {
+      String? toolCallId,
+    });
+
+String _effectiveToolCallId(
+  dynamic rawId,
+  String fallbackPrefix,
+  Object index,
+) {
+  final id = rawId?.toString().trim() ?? '';
+  if (id.isNotEmpty) return id;
+  return '${fallbackPrefix}_${DateTime.now().microsecondsSinceEpoch}_$index';
+}
+
 class ChatApiService {
   static const String _aihubmixAppCode = 'ZKRT3588';
   static final Map<String, CancelToken> _activeCancelTokens =
       <String, CancelToken>{};
+
+  static bool supportsOpenAIImagesApiRouting(
+    ProviderConfig config,
+    String modelId,
+  ) {
+    final kind = ProviderConfig.classify(
+      config.id,
+      explicitType: config.providerType,
+    );
+    return kind == ProviderKind.openai &&
+        _shouldUseOpenAIImagesApi(config, modelId);
+  }
 
   static void cancelRequest(String requestId) {
     final key = requestId.trim();
@@ -199,7 +230,9 @@ class ChatApiService {
     String raw, {
     required bool allowRemoteImages,
     required bool allowLocalImages,
+    bool allowDataImages = true,
     bool keepRemoteMarkdownText = true,
+    bool keepDisallowedImageText = true,
   }) async {
     if (raw.isEmpty) return const _ParsedTextAndImages('', <_ImageRef>[]);
     final mdImg = RegExp(r'!\[[^\]]*\]\(([^)]+)\)');
@@ -210,6 +243,72 @@ class ChatApiService {
     final buf = StringBuffer();
     int i = 0;
     while (i < raw.length) {
+      // Skip fenced code blocks (``` or ~~~): content inside is never an image.
+      if ((raw.startsWith('```', i) || raw.startsWith('~~~', i)) &&
+          (i == 0 || raw[i - 1] == '\n')) {
+        final fence = raw.substring(i, i + 3);
+        buf.write(fence);
+        i += 3;
+        // Skip the rest of the opening fence line (language tag, etc.)
+        while (i < raw.length && raw[i] != '\n') {
+          buf.write(raw[i]);
+          i++;
+        }
+        // Advance until the matching closing fence at the start of a line.
+        bool closed = false;
+        while (i < raw.length) {
+          if (raw[i] == '\n') {
+            buf.write(raw[i]);
+            i++;
+            if (raw.startsWith(fence, i)) {
+              buf.write(fence);
+              i += 3;
+              // Skip trailing content on the closing fence line.
+              while (i < raw.length && raw[i] != '\n') {
+                buf.write(raw[i]);
+                i++;
+              }
+              closed = true;
+              break;
+            }
+          } else {
+            buf.write(raw[i]);
+            i++;
+          }
+        }
+        if (!closed) {
+          // Unclosed fence: rest of text was written as-is already.
+        }
+        continue;
+      }
+      // Skip inline code spans (backtick sequences).
+      if (raw[i] == '`') {
+        // Determine the length of the opening backtick sequence.
+        int tickLen = 0;
+        while (i + tickLen < raw.length && raw[i + tickLen] == '`') {
+          tickLen++;
+        }
+        final openTicks = raw.substring(i, i + tickLen);
+        buf.write(openTicks);
+        i += tickLen;
+        // Advance until the matching closing backtick sequence.
+        bool closedTick = false;
+        while (i < raw.length) {
+          if (raw.startsWith(openTicks, i)) {
+            buf.write(openTicks);
+            i += tickLen;
+            closedTick = true;
+            break;
+          }
+          buf.write(raw[i]);
+          i++;
+        }
+        if (!closedTick) {
+          // Unclosed inline code: content was already written.
+        }
+        continue;
+      }
+
       final m1 = mdImg.matchAsPrefix(raw, i);
       final m2 = customImg.matchAsPrefix(raw, i);
       if (m1 != null) {
@@ -223,7 +322,11 @@ class ChatApiService {
         }
         // Inline base64 / data URLs: always treat as image but keep them out of text.
         if (url.startsWith('data:')) {
-          images.add(_ImageRef('data', url));
+          if (allowDataImages) {
+            images.add(_ImageRef('data', url));
+          } else if (keepDisallowedImageText) {
+            buf.write(full);
+          }
           i = m1.end;
           continue;
         }
@@ -232,7 +335,7 @@ class ChatApiService {
           if (!allowRemoteImages) {
             // Model does not accept image input (or we intentionally skip http images):
             // keep original markdown so the model can see the template.
-            buf.write(full);
+            if (keepDisallowedImageText) buf.write(full);
             i = m1.end;
             continue;
           }
@@ -253,7 +356,7 @@ class ChatApiService {
         }
         // Local / relative path: only treat as image when the file exists.
         if (!allowLocalImages) {
-          buf.write(full);
+          if (keepDisallowedImageText) buf.write(full);
           i = m1.end;
           continue;
         }
@@ -278,8 +381,51 @@ class ChatApiService {
         continue;
       }
       if (m2 != null) {
+        final full = raw.substring(m2.start, m2.end);
         final p = (m2.group(1) ?? '').trim();
-        if (p.isNotEmpty) images.add(_ImageRef('path', p));
+        if (p.isEmpty) {
+          buf.write(full);
+          i = m2.end;
+          continue;
+        }
+        if (p.startsWith('data:')) {
+          if (allowDataImages) {
+            images.add(_ImageRef('data', p));
+          } else if (keepDisallowedImageText) {
+            buf.write(full);
+          }
+          i = m2.end;
+          continue;
+        }
+        if (p.startsWith('http://') || p.startsWith('https://')) {
+          if (!allowRemoteImages) {
+            if (keepDisallowedImageText) buf.write(full);
+            i = m2.end;
+            continue;
+          }
+          images.add(_ImageRef('url', p));
+          i = m2.end;
+          continue;
+        }
+        if (!allowLocalImages) {
+          if (keepDisallowedImageText) buf.write(full);
+          i = m2.end;
+          continue;
+        }
+        try {
+          final fixed = SandboxPathResolver.fix(p);
+          final file = File(fixed);
+          if (!file.existsSync()) {
+            buf.write(full);
+            i = m2.end;
+            continue;
+          }
+        } catch (_) {
+          buf.write(full);
+          i = m2.end;
+          continue;
+        }
+        images.add(_ImageRef('path', p));
         i = m2.end;
         continue;
       }
@@ -302,6 +448,74 @@ class ChatApiService {
       return 'data:$mime;base64,$b64';
     }
     return b64;
+  }
+
+  static String _textFromContentParts(dynamic content) {
+    if (content is String) return content.trim();
+    if (content is! List) return (content ?? '').toString().trim();
+
+    final buffer = StringBuffer();
+    for (final part in content) {
+      if (part is String) {
+        buffer.write(part);
+        continue;
+      }
+      if (part is! Map) continue;
+      final type = (part['type'] ?? '').toString();
+      if (type.isNotEmpty &&
+          type != 'text' &&
+          type != 'input_text' &&
+          type != 'output_text') {
+        continue;
+      }
+      final text = (part['text'] ?? part['content'] ?? '').toString();
+      if (text.isEmpty) continue;
+      if (buffer.isNotEmpty) buffer.write('\n');
+      buffer.write(text);
+    }
+    return buffer.toString().trim();
+  }
+
+  static Future<String> _stripImageMarkersFromText(String raw) async {
+    final parsed = await _parseTextAndImages(
+      raw,
+      allowRemoteImages: false,
+      allowLocalImages: false,
+      allowDataImages: false,
+      keepRemoteMarkdownText: false,
+      keepDisallowedImageText: false,
+    );
+    return parsed.text;
+  }
+
+  static Future<dynamic> _stripImageInputsFromContent(dynamic content) async {
+    if (content is String) return _stripImageMarkersFromText(content);
+    if (content is List) {
+      return _stripImageMarkersFromText(_textFromContentParts(content));
+    }
+    if (content is Map) {
+      return _stripImageMarkersFromText(_textFromContentParts([content]));
+    }
+    return content;
+  }
+
+  static Future<List<Map<String, dynamic>>> _stripImageInputsFromMessages(
+    List<Map<String, dynamic>> messages,
+  ) async {
+    final out = <Map<String, dynamic>>[];
+    for (final message in messages) {
+      final copy = Map<String, dynamic>.from(message);
+      copy.remove(multimodalInternalMediaPathsKey);
+      if (copy.containsKey('content')) {
+        copy['content'] = await _stripImageInputsFromContent(copy['content']);
+      }
+      out.add(copy);
+    }
+    return out;
+  }
+
+  static bool _supportsImageInput(ProviderConfig config, String modelId) {
+    return _effectiveModelInfo(config, modelId).input.contains(Modality.image);
   }
 
   static http.Client _clientFor(ProviderConfig cfg, CancelToken cancelToken) {
@@ -327,6 +541,13 @@ class ChatApiService {
     return DioHttpClient(cancelToken: cancelToken);
   }
 
+  static String _decodeUtf8Body(
+    http.Response response, {
+    bool allowMalformed = false,
+  }) {
+    return utf8.decode(response.bodyBytes, allowMalformed: allowMalformed);
+  }
+
   static Stream<ChatStreamChunk> sendMessageStream({
     required ProviderConfig config,
     required String modelId,
@@ -337,11 +558,13 @@ class ChatApiService {
     double? topP,
     int? maxTokens,
     List<Map<String, dynamic>>? tools,
-    Future<String> Function(String name, Map<String, dynamic> args)? onToolCall,
+    ToolCallHandler? onToolCall,
     Map<String, String>? extraHeaders,
     Map<String, dynamic>? extraBody,
     bool stream = true,
     String? requestId,
+    bool allowImagesApiRouting = true,
+    bool ocrActive = false,
   }) async* {
     final kind = ProviderConfig.classify(
       config.id,
@@ -356,18 +579,42 @@ class ChatApiService {
       } catch (_) {}
       _activeCancelTokens[rid] = cancelToken;
     }
-    final safeMessages = _sanitizeMessages(messages);
+    final useOpenAIImagesApi =
+        kind == ProviderKind.openai &&
+        allowImagesApiRouting &&
+        _shouldUseOpenAIImagesApi(config, modelId);
+    final unicodeSafeMessages = _sanitizeMessages(messages);
+    final stripUnsupportedImageInputs =
+        !ocrActive &&
+        !useOpenAIImagesApi &&
+        !_supportsImageInput(config, modelId);
+    final safeMessages = stripUnsupportedImageInputs
+        ? await _stripImageInputsFromMessages(unicodeSafeMessages)
+        : unicodeSafeMessages;
+    final safeUserImagePaths = stripUnsupportedImageInputs
+        ? const <String>[]
+        : userImagePaths;
     final client = _clientFor(config, cancelToken);
 
     try {
       if (kind == ProviderKind.openai) {
-        if (config.useResponseApi == true) {
+        if (useOpenAIImagesApi) {
+          yield* _sendOpenAIImagesStream(
+            client,
+            config,
+            modelId,
+            safeMessages,
+            userImagePaths: safeUserImagePaths,
+            extraHeaders: extraHeaders,
+            extraBody: extraBody,
+          );
+        } else if (config.useResponseApi == true) {
           yield* _sendOpenAIResponsesStream(
             client,
             config,
             modelId,
             safeMessages,
-            userImagePaths: userImagePaths,
+            userImagePaths: safeUserImagePaths,
             thinkingBudget: thinkingBudget,
             temperature: temperature,
             topP: topP,
@@ -384,7 +631,7 @@ class ChatApiService {
             config,
             modelId,
             safeMessages,
-            userImagePaths: userImagePaths,
+            userImagePaths: safeUserImagePaths,
             thinkingBudget: thinkingBudget,
             temperature: temperature,
             topP: topP,
@@ -402,7 +649,7 @@ class ChatApiService {
           config,
           modelId,
           safeMessages,
-          userImagePaths: userImagePaths,
+          userImagePaths: safeUserImagePaths,
           thinkingBudget: thinkingBudget,
           temperature: temperature,
           topP: topP,
@@ -423,7 +670,7 @@ class ChatApiService {
             config: config,
             modelId: modelId,
             messages: safeMessages,
-            userImagePaths: userImagePaths,
+            userImagePaths: safeUserImagePaths,
             thinkingBudget: thinkingBudget,
             temperature: temperature,
             topP: topP,
@@ -440,7 +687,7 @@ class ChatApiService {
             config,
             modelId,
             safeMessages,
-            userImagePaths: userImagePaths,
+            userImagePaths: safeUserImagePaths,
             thinkingBudget: thinkingBudget,
             temperature: temperature,
             topP: topP,
@@ -457,7 +704,7 @@ class ChatApiService {
             config,
             modelId,
             safeMessages,
-            userImagePaths: userImagePaths,
+            userImagePaths: safeUserImagePaths,
             thinkingBudget: thinkingBudget,
             temperature: temperature,
             topP: topP,
@@ -506,12 +753,11 @@ class ChatApiService {
           ModelAbility.reasoning,
         );
         final effort = _openAIEffortForBudget(thinkingBudget, upstreamModelId);
-        final host = Uri.tryParse(config.baseUrl)?.host.toLowerCase() ?? '';
-        final modelLower = upstreamModelId.toLowerCase();
-        final bool isMimo =
-            host.contains('xiaomimimo') ||
-            modelLower.startsWith('mimo-') ||
-            modelLower.contains('/mimo-');
+        final info = _OpenAIProviderInfo(
+          host: Uri.tryParse(config.baseUrl)?.host.toLowerCase() ?? '',
+          providerId: config.id.toLowerCase(),
+          upstreamModelId: upstreamModelId,
+        );
         if (config.useResponseApi == true) {
           // Inject built-in web_search tool when enabled and supported
           final toolsList = <Map<String, dynamic>>[];
@@ -598,6 +844,11 @@ class ChatApiService {
           modelId: modelId,
           upstreamModelId: upstreamModelId,
         );
+        _applyOpenRouterClaudePromptCaching(
+          body,
+          config: config,
+          upstreamModelId: upstreamModelId,
+        );
         _applyCompatibleResponsesReasoning(
           body,
           config: config,
@@ -623,18 +874,13 @@ class ChatApiService {
         }
         // Vendor-specific reasoning knobs for chat-completions compatible hosts (non-streaming)
         if (config.useResponseApi != true) {
-          final off = _isOff(thinkingBudget);
-          if (host.contains('open.bigmodel.cn') ||
-              host.contains('bigmodel') ||
-              isMimo) {
-            // Zhipu BigModel / Xiaomi MiMo: thinking: { type: enabled|disabled }
-            if (isReasoning) {
-              body['thinking'] = {'type': off ? 'disabled' : 'enabled'};
-            } else {
-              body.remove('thinking');
-            }
-            body.remove('reasoning_effort');
-          } else if (_isKimiThinkingModel(upstreamModelId)) {
+          _applyVendorReasoningKnobs(
+            body,
+            info: info,
+            isReasoning: isReasoning,
+            thinkingBudget: thinkingBudget,
+          );
+          if (info.isKimiThinkingModel) {
             _normalizeMoonshotKimiChatBody(
               body,
               upstreamModelId: upstreamModelId,
@@ -657,21 +903,17 @@ class ChatApiService {
           upstreamModelId,
           fallbackEffort: effort,
         );
-        _normalizeMoonshotKimiChatBody(
-          body,
-          upstreamModelId: upstreamModelId,
-          isReasoning: isReasoning,
-          thinkingBudget: thinkingBudget,
-        );
         final resp = await client.post(
           url,
           headers: headers,
           body: jsonEncode(body),
         );
         if (resp.statusCode < 200 || resp.statusCode >= 300) {
-          throw HttpException('HTTP ${resp.statusCode}: ${resp.body}');
+          final responseText = _decodeUtf8Body(resp, allowMalformed: true);
+          throw HttpException('HTTP ${resp.statusCode}: $responseText');
         }
-        final data = jsonDecode(resp.body);
+        final responseText = _decodeUtf8Body(resp);
+        final data = jsonDecode(responseText);
         if (config.useResponseApi == true) {
           // Prefer SDK-style convenience when present
           final ot = data['output_text'];
@@ -710,13 +952,38 @@ class ChatApiService {
             ? config.baseUrl.substring(0, config.baseUrl.length - 1)
             : config.baseUrl;
         final url = Uri.parse('$base/messages');
+        final effectiveInfo = _effectiveModelInfo(config, modelId);
+        final isReasoning = effectiveInfo.abilities.contains(
+          ModelAbility.reasoning,
+        );
+        final omitSamplingParams = _claudeShouldOmitSamplingParams(
+          upstreamModelId,
+          thinkingBudget,
+        );
+        final thinking = isReasoning
+            ? _claudeThinkingConfig(
+                upstreamModelId,
+                thinkingBudget,
+                config: config,
+              )
+            : null;
+        final outputConfig = isReasoning
+            ? _claudeOutputConfig(
+                upstreamModelId,
+                thinkingBudget,
+                config: config,
+              )
+            : null;
         final body = <String, dynamic>{
           'model': upstreamModelId,
           'max_tokens': 512,
-          'temperature': 0.3,
+          if (!omitSamplingParams && !_isClaudeReasoningEnabled(thinkingBudget))
+            'temperature': 0.3,
           'messages': [
             {'role': 'user', 'content': safePrompt},
           ],
+          if (thinking != null) 'thinking': thinking,
+          if (outputConfig != null) 'output_config': outputConfig,
         };
         final headers = <String, String>{
           'x-api-key': _apiKeyForRequest(config, modelId),
@@ -740,13 +1007,23 @@ class ChatApiService {
           body: jsonEncode(body),
         );
         if (resp.statusCode < 200 || resp.statusCode >= 300) {
-          throw HttpException('HTTP ${resp.statusCode}: ${resp.body}');
+          final responseText = _decodeUtf8Body(resp, allowMalformed: true);
+          throw HttpException('HTTP ${resp.statusCode}: $responseText');
         }
-        final data = jsonDecode(resp.body);
+        final responseText = _decodeUtf8Body(resp);
+        final data = jsonDecode(responseText);
         final content = data['content'] as List?;
         if (content != null && content.isNotEmpty) {
-          final text = content.first['text'];
-          return (text ?? '').toString();
+          final buf = StringBuffer();
+          for (final item in content) {
+            if (item is! Map) continue;
+            if ((item['type'] ?? '').toString() != 'text') continue;
+            final text = item['text'];
+            if (text is String && text.isNotEmpty) {
+              buf.write(text);
+            }
+          }
+          return buf.toString();
         }
         return '';
       } else {
@@ -847,9 +1124,11 @@ class ChatApiService {
           body: jsonEncode(body),
         );
         if (resp.statusCode < 200 || resp.statusCode >= 300) {
-          throw HttpException('HTTP ${resp.statusCode}: ${resp.body}');
+          final responseText = _decodeUtf8Body(resp, allowMalformed: true);
+          throw HttpException('HTTP ${resp.statusCode}: $responseText');
         }
-        final data = jsonDecode(resp.body);
+        final responseText = _decodeUtf8Body(resp);
+        final data = jsonDecode(responseText);
         final candidates = data['candidates'] as List?;
         if (candidates != null && candidates.isNotEmpty) {
           final parts = candidates.first['content']?['parts'] as List?;
@@ -896,6 +1175,205 @@ class ChatApiService {
     if (budget <= 2000) return 'low';
     if (budget <= 20000) return 'medium';
     return 'high';
+  }
+
+  static bool _isClaudeReasoningEnabled(int? budget) => budget != 0;
+
+  static bool _isDeepSeekClaudeCompatible(
+    String modelId, {
+    ProviderConfig? config,
+  }) {
+    final lowerModelId = modelId.trim().toLowerCase();
+    if (lowerModelId.contains('deepseek')) return true;
+    if (config == null) return false;
+    final baseUrl = config.baseUrl.trim().toLowerCase();
+    final providerId = config.id.trim().toLowerCase();
+    final providerName = config.name.trim().toLowerCase();
+    return baseUrl.contains('api.deepseek.com') ||
+        providerId.contains('deepseek') ||
+        providerName.contains('deepseek');
+  }
+
+  static bool _supportsClaudeAdaptiveThinking(String modelId) {
+    final lower = modelId.trim().toLowerCase();
+    if (!lower.contains('claude-')) return false;
+    if (lower.contains('fable') || lower.contains('mythos')) return true;
+    final m = RegExp(
+      r'claude-(opus|sonnet)-(\d+)[-.](\d+)',
+      caseSensitive: false,
+    ).firstMatch(lower);
+    if (m != null) {
+      final major = int.tryParse(m.group(2) ?? '');
+      final minor = int.tryParse(m.group(3) ?? '');
+      if (major != null && minor != null) {
+        return major > 4 || (major == 4 && minor >= 6);
+      }
+    }
+    return lower.contains('4-6') || lower.contains('4.6');
+  }
+
+  static bool _isClaudeAdaptiveOnlyThinkingModel(String modelId) {
+    final lower = modelId.trim().toLowerCase();
+    if (!lower.contains('claude-')) return false;
+    if (lower.contains('fable') || lower.contains('mythos')) return true;
+    final m = RegExp(
+      r'claude-(opus|sonnet)-(\d+)[-.](\d+)',
+      caseSensitive: false,
+    ).firstMatch(lower);
+    if (m == null) {
+      return lower.contains('4-7') ||
+          lower.contains('4.7') ||
+          lower.contains('4-8') ||
+          lower.contains('4.8');
+    }
+    final family = (m.group(1) ?? '').toLowerCase();
+    final major = int.tryParse(m.group(2) ?? '');
+    final minor = int.tryParse(m.group(3) ?? '');
+    if (major == null || minor == null) return false;
+    if (major > 4) return true;
+    if (major < 4) return false;
+    if (family == 'opus' && minor >= 7) return true;
+    return false;
+  }
+
+  static bool _isClaudeThinkingAlwaysOnModel(String modelId) {
+    final lower = modelId.trim().toLowerCase();
+    return lower.contains('claude-fable') || lower.contains('claude-mythos');
+  }
+
+  static String _claudeEffortForBudget(int? budget) {
+    if (budget == null || budget == -1) return 'auto';
+    if (_isOff(budget)) return 'off';
+    if (budget <= 2000) return 'low';
+    if (budget <= 20000) return 'medium';
+    if (budget <= 32000) return 'high';
+    if (budget <= 64000) return 'xhigh';
+    return 'max';
+  }
+
+  static String _normalizeClaudeEffort(String effort, String modelId) {
+    final normalizedEffort = effort.trim().toLowerCase();
+    if (normalizedEffort.isEmpty) return effort;
+    if (normalizedEffort == 'auto' || normalizedEffort == 'off') {
+      return normalizedEffort;
+    }
+
+    final lower = modelId.trim().toLowerCase();
+    final supportsXhigh =
+        lower.contains('claude-opus-4-7') ||
+        lower.contains('claude-opus-4.7') ||
+        lower.contains('claude-opus-4-8') ||
+        lower.contains('claude-opus-4.8') ||
+        lower.contains('claude-fable') ||
+        lower.contains('claude-mythos');
+    final supportsMax =
+        supportsXhigh ||
+        lower.contains('claude-opus-4-6') ||
+        lower.contains('claude-opus-4.6') ||
+        lower.contains('claude-sonnet-4-6') ||
+        lower.contains('claude-sonnet-4.6') ||
+        lower.contains('mythos');
+
+    switch (normalizedEffort) {
+      case 'max':
+        if (supportsMax) return 'max';
+        return supportsXhigh ? 'xhigh' : 'high';
+      case 'xhigh':
+        if (supportsXhigh) return 'xhigh';
+        if (supportsMax) return 'max';
+        return 'high';
+      case 'high':
+      case 'medium':
+      case 'low':
+        return normalizedEffort;
+      default:
+        return normalizedEffort;
+    }
+  }
+
+  static Map<String, dynamic>? _claudeThinkingConfig(
+    String modelId,
+    int? budget, {
+    ProviderConfig? config,
+  }) {
+    if (_isClaudeThinkingAlwaysOnModel(modelId)) {
+      if (!_isClaudeReasoningEnabled(budget)) return null;
+      return <String, dynamic>{'type': 'adaptive', 'display': 'summarized'};
+    }
+    if (!_isClaudeReasoningEnabled(budget)) {
+      return <String, dynamic>{'type': 'disabled'};
+    }
+    if (_isDeepSeekClaudeCompatible(modelId, config: config)) {
+      return <String, dynamic>{'type': 'enabled'};
+    }
+    if (_supportsClaudeAdaptiveThinking(modelId)) {
+      return <String, dynamic>{'type': 'adaptive', 'display': 'summarized'};
+    }
+    if (budget != null && budget > 0) {
+      return <String, dynamic>{'type': 'enabled', 'budget_tokens': budget};
+    }
+    return <String, dynamic>{'type': 'disabled'};
+  }
+
+  static Map<String, dynamic>? _claudeOutputConfig(
+    String modelId,
+    int? budget, {
+    ProviderConfig? config,
+  }) {
+    if (_isClaudeThinkingAlwaysOnModel(modelId)) {
+      final effort = _normalizeClaudeEffort(
+        _claudeEffortForBudget(budget),
+        modelId,
+      );
+      if (effort == 'auto' || effort == 'off') return null;
+      return <String, dynamic>{'effort': effort};
+    }
+    if (_isDeepSeekClaudeCompatible(modelId, config: config)) {
+      if (!_isClaudeReasoningEnabled(budget)) return null;
+      final effort = _claudeEffortForBudget(budget);
+      if (effort == 'auto' || effort == 'off') return null;
+      return <String, dynamic>{
+        'effort': (effort == 'xhigh' || effort == 'max') ? 'max' : 'high',
+      };
+    }
+    if (!_supportsClaudeAdaptiveThinking(modelId) ||
+        !_isClaudeReasoningEnabled(budget)) {
+      return null;
+    }
+    final effort = _normalizeClaudeEffort(
+      _claudeEffortForBudget(budget),
+      modelId,
+    );
+    if (effort == 'auto' || effort == 'off') return null;
+    return <String, dynamic>{'effort': effort};
+  }
+
+  static bool _claudeShouldOmitSamplingParams(String modelId, int? budget) {
+    if (_isClaudeThinkingAlwaysOnModel(modelId)) return true;
+    return _isClaudeAdaptiveOnlyThinkingModel(modelId) &&
+        _isClaudeReasoningEnabled(budget);
+  }
+
+  static double? _claudeCompatibleTopP(
+    String modelId,
+    int? budget,
+    double? topP,
+  ) {
+    if (topP == null) return null;
+    if (_claudeShouldOmitSamplingParams(modelId, budget)) {
+      return null;
+    }
+    if (!_isClaudeReasoningEnabled(budget)) {
+      return topP;
+    }
+    if (topP < 0.95 || topP > 1.0) {
+      FlutterLogger.log(
+        '[ClaudeCompat] Omit top_p=$topP because thinking requires 0.95 <= top_p <= 1.0.',
+        tag: 'ChatApiService',
+      );
+      return null;
+    }
+    return topP;
   }
 
   // Clean JSON Schema for Google Gemini API strict validation
@@ -989,6 +1467,13 @@ class _GeminiSignatureMeta {
   bool get hasAny => hasText || hasImages;
 }
 
+class _ResponsesImageGenerationResult {
+  final String base64;
+  final String? outputFormat;
+
+  const _ResponsesImageGenerationResult({this.base64 = '', this.outputFormat});
+}
+
 class ChatStreamChunk {
   final String content;
   // Optional reasoning delta (when model supports reasoning)
@@ -1014,7 +1499,13 @@ class ToolCallInfo {
   final String id;
   final String name;
   final Map<String, dynamic> arguments;
-  ToolCallInfo({required this.id, required this.name, required this.arguments});
+  final Map<String, dynamic>? metadata;
+  ToolCallInfo({
+    required this.id,
+    required this.name,
+    required this.arguments,
+    this.metadata,
+  });
 }
 
 class ToolResultInfo {
@@ -1022,10 +1513,12 @@ class ToolResultInfo {
   final String name;
   final Map<String, dynamic> arguments;
   final String content;
+  final Map<String, dynamic>? metadata;
   ToolResultInfo({
     required this.id,
     required this.name,
     required this.arguments,
     required this.content,
+    this.metadata,
   });
 }

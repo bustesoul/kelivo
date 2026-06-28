@@ -8,7 +8,11 @@ import '../../../l10n/app_localizations.dart';
 import '../../../main.dart';
 import '../../../shared/widgets/interactive_drawer.dart';
 import '../../../shared/responsive/breakpoints.dart';
+import '../../../shared/widgets/ios_form_text_field.dart';
+import '../../../shared/widgets/ios_tactile.dart';
+import '../../../shared/widgets/loading_dialog_card.dart';
 import '../../../shared/widgets/snackbar.dart';
+import '../../../theme/app_font_weights.dart';
 import '../../../theme/design_tokens.dart';
 import '../../../core/providers/settings_provider.dart';
 import '../../../core/providers/assistant_provider.dart';
@@ -28,6 +32,7 @@ import '../../../desktop/mini_map_popover.dart';
 import '../../../desktop/quick_phrase_popover.dart';
 import '../../../desktop/instruction_injection_popover.dart';
 import '../../../desktop/world_book_popover.dart';
+import '../../../icons/lucide_adapter.dart';
 import '../../chat/widgets/bottom_tools_sheet.dart';
 import '../../chat/widgets/context_management_sheet.dart';
 import '../../chat/widgets/reasoning_budget_sheet.dart';
@@ -46,11 +51,15 @@ import '../widgets/learning_prompt_sheet.dart';
 import '../widgets/scroll_nav_buttons.dart';
 import '../widgets/message_list_view.dart';
 import '../widgets/chat_input_section.dart';
+import '../widgets/chat_input_overlay_layout.dart';
 import '../widgets/chat_selection_app_bar.dart';
+import '../widgets/chat_selection_delete_bar.dart';
 import '../widgets/chat_selection_export_bar.dart';
+import '../widgets/user_message_edit_overlay.dart';
 import '../utils/model_display_helper.dart';
 import '../utils/chat_layout_constants.dart';
 import '../controllers/home_page_controller.dart';
+import '../controllers/home_view_model.dart';
 import '../controllers/scroll_controller.dart' as scroll_ctrl;
 import 'home_mobile_layout.dart';
 import 'home_desktop_layout.dart';
@@ -60,6 +69,348 @@ class HomePage extends StatefulWidget {
 
   @override
   State<HomePage> createState() => _HomePageState();
+}
+
+class _TemporaryConversationEmptyState extends StatelessWidget {
+  const _TemporaryConversationEmptyState({
+    required this.topContentPadding,
+    required this.bottomContentPadding,
+  });
+
+  final double topContentPadding;
+  final double bottomContentPadding;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final cs = Theme.of(context).colorScheme;
+
+    return Center(
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(
+          32,
+          topContentPadding + 24,
+          32,
+          bottomContentPadding + 24,
+        ),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 420),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Lucide.HatGlasses,
+                size: 72,
+                color: cs.onSurface.withValues(alpha: 0.42),
+              ),
+              const SizedBox(height: 18),
+              Text(
+                l10n.temporaryChatEmptyMessage,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 15,
+                  height: 1.45,
+                  color: cs.onSurface.withValues(alpha: 0.68),
+                  fontWeight: AppFontWeights.medium,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+String _compressContextErrorMessage(AppLocalizations l10n, String error) {
+  return switch (error) {
+    'no_messages' => l10n.compressContextNoMessages,
+    'no_conversation' => l10n.compressContextNoConversation,
+    'no_model' => l10n.compressContextNoModel,
+    'empty_summary' => l10n.compressContextEmptySummary,
+    _ => '${l10n.compressContextFailed}: $error',
+  };
+}
+
+class _CompressContextOptionsDialog extends StatefulWidget {
+  const _CompressContextOptionsDialog();
+
+  @override
+  State<_CompressContextOptionsDialog> createState() =>
+      _CompressContextOptionsDialogState();
+}
+
+class _CompressContextOptionsDialogState
+    extends State<_CompressContextOptionsDialog> {
+  CompressContextLimitMode _mode = CompressContextLimitMode.start;
+  late final TextEditingController _maxCharsController;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _maxCharsController = TextEditingController(
+      text: CompressContextOptions.defaultMaxChars.toString(),
+    );
+  }
+
+  @override
+  void dispose() {
+    _maxCharsController.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    int? maxChars;
+    if (_mode != CompressContextLimitMode.unlimited) {
+      maxChars = int.tryParse(_maxCharsController.text.trim());
+      if (maxChars == null || maxChars <= 0) {
+        setState(() {
+          _error = AppLocalizations.of(context)!.compressContextInvalidLimit;
+        });
+        return;
+      }
+    }
+
+    Navigator.of(
+      context,
+    ).pop(CompressContextOptions(mode: _mode, maxChars: maxChars));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final cs = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final panelColor = isDark ? const Color(0xFF1C1C1E) : cs.surface;
+    final constrainedWidth = MediaQuery.of(
+      context,
+    ).size.width.clamp(0.0, 420.0).toDouble();
+
+    return Dialog(
+      insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+      backgroundColor: Colors.transparent,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: constrainedWidth),
+        child: Material(
+          color: panelColor,
+          borderRadius: BorderRadius.circular(18),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(18, 18, 18, 14),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    Icon(Lucide.package2, size: 20, color: cs.primary),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        l10n.compressContextOptionsTitle,
+                        style: TextStyle(
+                          fontSize: 17,
+                          fontWeight: AppFontWeights.emphasis,
+                          color: cs.onSurface,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  l10n.compressContextOptionsDesc,
+                  style: TextStyle(
+                    fontSize: 13,
+                    height: 1.35,
+                    color: cs.onSurface.withValues(alpha: 0.62),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                _CompressModeSegmented(
+                  mode: _mode,
+                  onChanged: (mode) {
+                    setState(() {
+                      _mode = mode;
+                      _error = null;
+                    });
+                  },
+                ),
+                if (_mode != CompressContextLimitMode.unlimited) ...[
+                  const SizedBox(height: 10),
+                  IosFormTextField(
+                    label: l10n.compressContextMaxCharsLabel,
+                    controller: _maxCharsController,
+                    keyboardType: TextInputType.number,
+                    textInputAction: TextInputAction.done,
+                    selectAllOnFocus: true,
+                    fieldWidth: 120,
+                    onChanged: (_) {
+                      if (_error != null) setState(() => _error = null);
+                    },
+                  ),
+                ],
+                if (_error != null) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    _error!,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: cs.error,
+                      fontWeight: AppFontWeights.medium,
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 18),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _DialogActionButton(
+                        label: l10n.homePageCancel,
+                        onTap: () => Navigator.of(context).maybePop(),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: _DialogActionButton(
+                        label: l10n.compressContextStartButton,
+                        primary: true,
+                        onTap: _submit,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CompressModeSegmented extends StatelessWidget {
+  const _CompressModeSegmented({required this.mode, required this.onChanged});
+
+  final CompressContextLimitMode mode;
+  final ValueChanged<CompressContextLimitMode> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    return Row(
+      children: [
+        Expanded(
+          child: _SegmentButton(
+            label: l10n.compressContextKeepStart,
+            selected: mode == CompressContextLimitMode.start,
+            onTap: () => onChanged(CompressContextLimitMode.start),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: _SegmentButton(
+            label: l10n.compressContextKeepRecent,
+            selected: mode == CompressContextLimitMode.recent,
+            onTap: () => onChanged(CompressContextLimitMode.recent),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: _SegmentButton(
+            label: l10n.compressContextUnlimited,
+            selected: mode == CompressContextLimitMode.unlimited,
+            onTap: () => onChanged(CompressContextLimitMode.unlimited),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _SegmentButton extends StatelessWidget {
+  const _SegmentButton({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final selectedBg = isDark
+        ? cs.primary.withValues(alpha: 0.22)
+        : cs.primary.withValues(alpha: 0.12);
+    final baseBg = isDark ? Colors.white10 : const Color(0xFFF2F3F5);
+
+    return IosCardPress(
+      baseColor: selected ? selectedBg : baseBg,
+      borderRadius: BorderRadius.circular(10),
+      pressedScale: 0.98,
+      onTap: onTap,
+      haptics: false,
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+      child: Center(
+        child: Text(
+          label,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            fontSize: 13,
+            fontWeight: AppFontWeights.emphasis,
+            color: selected ? cs.primary : cs.onSurface.withValues(alpha: 0.78),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DialogActionButton extends StatelessWidget {
+  const _DialogActionButton({
+    required this.label,
+    required this.onTap,
+    this.primary = false,
+  });
+
+  final String label;
+  final VoidCallback onTap;
+  final bool primary;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final base = primary
+        ? cs.primary
+        : (isDark ? Colors.white10 : const Color(0xFFF2F3F5));
+
+    return IosCardPress(
+      baseColor: base,
+      borderRadius: BorderRadius.circular(11),
+      pressedScale: 0.98,
+      onTap: onTap,
+      haptics: false,
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      child: Center(
+        child: Text(
+          label,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            fontSize: 14,
+            fontWeight: AppFontWeights.emphasis,
+            color: primary ? cs.onPrimary : cs.onSurface,
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class _HomePageState extends State<HomePage>
@@ -80,7 +431,8 @@ class _HomePageState extends State<HomePage>
   final BackdropKey _messageListBackdropKey = BackdropKey();
   final GlobalKey _inputBarKey = GlobalKey();
   final GlobalKey _selectionMiniMapKey = GlobalKey();
-  final GlobalKey _selectionExportBarKey = GlobalKey();
+  final GlobalKey _selectionActionBarKey = GlobalKey();
+  bool _scrollNavHovering = false;
   StreamSubscription<String>? _processTextSub;
 
   // ============================================================================
@@ -231,8 +583,9 @@ class _HomePageState extends State<HomePage>
 
     final modelInfo = getModelDisplayInfo(settings, assistant: assistant);
 
-    final title =
-        ((_controller.currentConversation?.title ?? '').trim().isNotEmpty)
+    final title = _controller.isTemporaryConversation
+        ? AppLocalizations.of(context)!.temporaryChatTitle
+        : ((_controller.currentConversation?.title ?? '').trim().isNotEmpty)
         ? _controller.currentConversation!.title
         : _controller.titleForLocale();
 
@@ -286,29 +639,22 @@ class _HomePageState extends State<HomePage>
       onNewConversation: () async {
         await _controller.createNewConversationAnimated();
       },
-      onOpenMiniMap: () async {
-        final collapsed = _controller.collapseVersions(_controller.messages);
-        String? selectedId;
-        if (PlatformUtils.isDesktop) {
-          selectedId = await showDesktopMiniMapPopover(
-            context,
-            anchorKey: _inputBarKey,
-            messages: collapsed,
-          );
-        } else {
-          selectedId = await showMiniMapSheet(context, collapsed);
-        }
-        if (!mounted) return;
-        if (selectedId != null && selectedId.isNotEmpty) {
-          await _controller.scrollToMessageId(selectedId);
-        }
-      },
+      onOpenMiniMap: _openMiniMap,
       onCreateNewConversation: () async {
         await _controller.createNewConversationAnimated();
         if (mounted) {
           _controller.forceScrollToBottomSoon(animate: false);
         }
       },
+      onToggleTemporaryConversation: () async {
+        await _controller.toggleTemporaryConversation();
+        if (mounted) {
+          _controller.forceScrollToBottomSoon(animate: false);
+        }
+      },
+      canToggleTemporaryConversation:
+          _controller.canToggleTemporaryConversation,
+      temporaryConversationEnabled: _controller.isTemporaryConversation,
       onSelectModel: () => showModelSelectSheet(context),
       globalSearchMode: _controller.isGlobalSearchMode,
       globalSearchQuery: _controller.globalSearchQuery,
@@ -337,85 +683,68 @@ class _HomePageState extends State<HomePage>
   }
 
   Widget _buildMobileBody(BuildContext context, ColorScheme cs) {
-    return Stack(
-      children: [
-        // Background
-        _buildChatBackground(context, cs),
-        // Main content
-        Padding(
-          padding: EdgeInsets.only(
-            top: kToolbarHeight + MediaQuery.paddingOf(context).top,
-          ),
-          child: Column(
-            children: [
-              Expanded(
+    final bottomContentPadding = _controller.inputBarHeight + 16;
+    final topContentPadding = _chatTopOverlayInset(context) + 8;
+    final backgroundImageActive = _assistantBackgroundActive(context);
+
+    return ChatInputOverlayLayout(
+      topInset: _chatTopOverlayInset(context),
+      background: backgroundImageActive
+          ? _buildChatBackground(context, cs)
+          : null,
+      topBackground: backgroundImageActive
+          ? _buildChatBackground(context, cs)
+          : null,
+      backgroundImageActive: backgroundImageActive,
+      content: Builder(
+        builder: (context) {
+          final content = KeyedSubtree(
+            key: ValueKey<String>(
+              _controller.currentConversation?.id ?? 'none',
+            ),
+            child: _buildMessageListView(
+              context,
+              topContentPadding: topContentPadding,
+              bottomContentPadding: bottomContentPadding,
+              dividerPadding: const EdgeInsets.symmetric(
+                vertical: 10,
+                horizontal: AppSpacing.md,
+              ),
+            ),
+          );
+          final isAndroid =
+              Theme.of(context).platform == TargetPlatform.android;
+          Widget w = content;
+          if (!isAndroid) {
+            w = w
+                .animate(
+                  key: ValueKey(
+                    'mob_body_${_controller.currentConversation?.id ?? 'none'}',
+                  ),
+                )
+                .fadeIn(duration: 200.ms, curve: Curves.easeOutCubic);
+            w = FadeTransition(opacity: _controller.convoFade, child: w);
+          }
+          return w;
+        },
+      ),
+      bottomOverlay: _controller.selecting
+          ? _buildSelectionActionBar(context)
+          : NotificationListener<SizeChangedLayoutNotification>(
+              onNotification: (n) {
+                WidgetsBinding.instance.addPostFrameCallback(
+                  (_) => _controller.measureInputBar(),
+                );
+                return false;
+              },
+              child: SizeChangedLayoutNotifier(
                 child: Builder(
-                  builder: (context) {
-                    final content = KeyedSubtree(
-                      key: ValueKey<String>(
-                        _controller.currentConversation?.id ?? 'none',
-                      ),
-                      child: _buildMessageListView(
-                        context,
-                        dividerPadding: const EdgeInsets.symmetric(
-                          vertical: 10,
-                          horizontal: AppSpacing.md,
-                        ),
-                      ),
-                    );
-                    final isAndroid =
-                        Theme.of(context).platform == TargetPlatform.android;
-                    Widget w = content;
-                    if (!isAndroid) {
-                      w = w
-                          .animate(
-                            key: ValueKey(
-                              'mob_body_${_controller.currentConversation?.id ?? 'none'}',
-                            ),
-                          )
-                          .fadeIn(duration: 200.ms, curve: Curves.easeOutCubic);
-                      w = FadeTransition(
-                        opacity: _controller.convoFade,
-                        child: w,
-                      );
-                    }
-                    return w;
-                  },
+                  builder: (context) =>
+                      _buildChatInputBar(context, isTablet: false),
                 ),
               ),
-              if (_controller.selecting)
-                ChatSelectionExportBar(
-                  key: _selectionExportBarKey,
-                  onExportMarkdown: _controller.exportSelectedAsMarkdown,
-                  onExportTxt: _controller.exportSelectedAsTxt,
-                  onExportImage: _controller.exportSelectedAsImage,
-                  showThinkingTools: _controller.showThinkingTools,
-                  showThinkingContent: _controller.showThinkingContent,
-                  onToggleThinkingTools: _controller.toggleThinkingTools,
-                  onToggleThinkingContent: _controller.toggleThinkingContent,
-                )
-              else
-                // Input bar
-                NotificationListener<SizeChangedLayoutNotification>(
-                  onNotification: (n) {
-                    WidgetsBinding.instance.addPostFrameCallback(
-                      (_) => _controller.measureInputBar(),
-                    );
-                    return false;
-                  },
-                  child: SizeChangedLayoutNotifier(
-                    child: Builder(
-                      builder: (context) =>
-                          _buildChatInputBar(context, isTablet: false),
-                    ),
-                  ),
-                ),
-            ],
-          ),
-        ),
-        // Scroll navigation buttons
-        _buildScrollButtons(),
-      ],
+            ),
+      foreground: _buildForegroundOverlay(context),
     );
   }
 
@@ -461,6 +790,13 @@ class _HomePageState extends State<HomePage>
         await _controller.createNewConversationAnimated();
         if (mounted) _controller.forceScrollToBottomSoon(animate: false);
       },
+      onToggleTemporaryConversation: () async {
+        await _controller.toggleTemporaryConversation();
+        if (mounted) _controller.forceScrollToBottomSoon(animate: false);
+      },
+      canToggleTemporaryConversation:
+          _controller.canToggleTemporaryConversation,
+      temporaryConversationEnabled: _controller.isTemporaryConversation,
       globalSearchMode: _controller.isGlobalSearchMode,
       globalSearchQuery: _controller.globalSearchQuery,
       onGlobalSearchQueryChanged: _controller.setGlobalSearchQuery,
@@ -490,14 +826,14 @@ class _HomePageState extends State<HomePage>
   }
 
   Future<void> _openSelectionMiniMap() async {
-    final collapsed = _controller.collapseVersions(_controller.messages);
+    final collapsed = _controller.allCollapsedMessagesForCurrentConversation();
     if (collapsed.isEmpty) return;
 
     if (PlatformUtils.isDesktop &&
-        _selectionExportBarKey.currentContext != null) {
+        _selectionActionBarKey.currentContext != null) {
       await showDesktopMiniMapPopover(
         context,
-        anchorKey: _selectionExportBarKey,
+        anchorKey: _selectionActionBarKey,
         messages: collapsed,
         selecting: true,
         selectedMessageIds: _controller.selectedItems,
@@ -523,92 +859,104 @@ class _HomePageState extends State<HomePage>
     );
   }
 
+  Widget _buildSelectionActionBar(BuildContext context) {
+    if (_controller.selectionMode == ChatSelectionMode.delete) {
+      return ChatSelectionDeleteBar(
+        key: _selectionActionBarKey,
+        hasMultiVersionSelection:
+            _controller.selectedMessagesIncludeMultipleVersions,
+        onDeleteCurrentVersions: () {
+          unawaited(
+            _handleDeleteSelectedMessages(context, deleteAllVersions: false),
+          );
+        },
+        onDeleteAllVersions: () {
+          unawaited(
+            _handleDeleteSelectedMessages(context, deleteAllVersions: true),
+          );
+        },
+      );
+    }
+
+    return ChatSelectionExportBar(
+      key: _selectionActionBarKey,
+      onExportMarkdown: _controller.exportSelectedAsMarkdown,
+      onExportTxt: _controller.exportSelectedAsTxt,
+      onExportImage: _controller.exportSelectedAsImage,
+      showThinkingTools: _controller.showThinkingTools,
+      showThinkingContent: _controller.showThinkingContent,
+      onToggleThinkingTools: _controller.toggleThinkingTools,
+      onToggleThinkingContent: _controller.toggleThinkingContent,
+    );
+  }
+
   Widget _buildTabletBody(BuildContext context, ColorScheme cs) {
-    return Stack(
-      children: [
-        Padding(
-          padding: EdgeInsets.only(
-            top: kToolbarHeight + MediaQuery.paddingOf(context).top,
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Expanded(
-                child: FadeTransition(
-                  opacity: _controller.convoFade,
-                  child:
-                      KeyedSubtree(
-                            key: ValueKey<String>(
-                              _controller.currentConversation?.id ?? 'none',
-                            ),
-                            child: _buildMessageListView(
-                              context,
-                              dividerPadding: const EdgeInsets.symmetric(
-                                vertical: 8,
-                                horizontal: 12,
-                              ),
-                            ),
-                          )
-                          .animate(
-                            key: ValueKey(
-                              'tab_body_${_controller.currentConversation?.id ?? 'none'}',
-                            ),
-                          )
-                          .fadeIn(duration: 200.ms, curve: Curves.easeOutCubic),
-                ),
-              ),
-              if (_controller.selecting)
-                Center(
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(
-                      maxWidth: ChatLayoutConstants.maxInputWidth,
-                    ),
-                    child: ChatSelectionExportBar(
-                      key: _selectionExportBarKey,
-                      onExportMarkdown: _controller.exportSelectedAsMarkdown,
-                      onExportTxt: _controller.exportSelectedAsTxt,
-                      onExportImage: _controller.exportSelectedAsImage,
-                      showThinkingTools: _controller.showThinkingTools,
-                      showThinkingContent: _controller.showThinkingContent,
-                      onToggleThinkingTools: _controller.toggleThinkingTools,
-                      onToggleThinkingContent:
-                          _controller.toggleThinkingContent,
+    final bottomContentPadding = _controller.inputBarHeight + 16;
+    final topContentPadding = _chatTopOverlayInset(context) + 8;
+    final backgroundImageActive = _assistantBackgroundActive(context);
+
+    return ChatInputOverlayLayout(
+      topInset: _chatTopOverlayInset(context),
+      topBackground: backgroundImageActive
+          ? _buildAssistantBackground(context)
+          : null,
+      backgroundImageActive: backgroundImageActive,
+      content: FadeTransition(
+        opacity: _controller.convoFade,
+        child:
+            KeyedSubtree(
+                  key: ValueKey<String>(
+                    _controller.currentConversation?.id ?? 'none',
+                  ),
+                  child: _buildMessageListView(
+                    context,
+                    topContentPadding: topContentPadding,
+                    bottomContentPadding: bottomContentPadding,
+                    dividerPadding: const EdgeInsets.symmetric(
+                      vertical: 8,
+                      horizontal: 12,
                     ),
                   ),
                 )
-              else
-                NotificationListener<SizeChangedLayoutNotification>(
-                  onNotification: (n) {
-                    WidgetsBinding.instance.addPostFrameCallback(
-                      (_) => _controller.measureInputBar(),
-                    );
-                    return false;
-                  },
-                  child: SizeChangedLayoutNotifier(
-                    child: Builder(
-                      builder: (context) {
-                        Widget input = _buildChatInputBar(
-                          context,
-                          isTablet: true,
-                        );
-                        input = Center(
-                          child: ConstrainedBox(
-                            constraints: const BoxConstraints(
-                              maxWidth: ChatLayoutConstants.maxInputWidth,
-                            ),
-                            child: input,
-                          ),
-                        );
-                        return input;
-                      },
-                    ),
+                .animate(
+                  key: ValueKey(
+                    'tab_body_${_controller.currentConversation?.id ?? 'none'}',
                   ),
+                )
+                .fadeIn(duration: 200.ms, curve: Curves.easeOutCubic),
+      ),
+      bottomOverlay: _controller.selecting
+          ? ConstrainedBox(
+              constraints: const BoxConstraints(
+                maxWidth: ChatLayoutConstants.maxInputWidth,
+              ),
+              child: _buildSelectionActionBar(context),
+            )
+          : NotificationListener<SizeChangedLayoutNotification>(
+              onNotification: (n) {
+                WidgetsBinding.instance.addPostFrameCallback(
+                  (_) => _controller.measureInputBar(),
+                );
+                return false;
+              },
+              child: SizeChangedLayoutNotifier(
+                child: Builder(
+                  builder: (context) {
+                    Widget input = _buildChatInputBar(context, isTablet: true);
+                    input = Center(
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(
+                          maxWidth: ChatLayoutConstants.maxInputWidth,
+                        ),
+                        child: input,
+                      ),
+                    );
+                    return input;
+                  },
                 ),
-            ],
-          ),
-        ),
-        _buildScrollButtons(),
-      ],
+              ),
+            ),
+      foreground: _buildForegroundOverlay(context),
     );
   }
 
@@ -636,45 +984,43 @@ class _HomePageState extends State<HomePage>
           if (!file.existsSync()) return const SizedBox.shrink();
           provider = FileImage(file);
         }
-        return Positioned.fill(
-          child: Stack(
-            children: [
-              Positioned.fill(
+        return Stack(
+          children: [
+            Positioned.fill(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  image: DecorationImage(
+                    image: provider,
+                    fit: BoxFit.cover,
+                    colorFilter: ColorFilter.mode(
+                      Colors.black.withValues(alpha: 0.04),
+                      BlendMode.srcATop,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            Positioned.fill(
+              child: IgnorePointer(
                 child: DecoratedBox(
                   decoration: BoxDecoration(
-                    image: DecorationImage(
-                      image: provider,
-                      fit: BoxFit.cover,
-                      colorFilter: ColorFilter.mode(
-                        Colors.black.withValues(alpha: 0.04),
-                        BlendMode.srcATop,
-                      ),
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: () {
+                        final top = (0.20 * maskStrength).clamp(0.0, 1.0);
+                        final bottom = (0.50 * maskStrength).clamp(0.0, 1.0);
+                        return [
+                          cs.surface.withValues(alpha: top),
+                          cs.surface.withValues(alpha: bottom),
+                        ];
+                      }(),
                     ),
                   ),
                 ),
               ),
-              Positioned.fill(
-                child: IgnorePointer(
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                        colors: () {
-                          final top = (0.20 * maskStrength).clamp(0.0, 1.0);
-                          final bottom = (0.50 * maskStrength).clamp(0.0, 1.0);
-                          return [
-                            cs.surface.withValues(alpha: top),
-                            cs.surface.withValues(alpha: bottom),
-                          ];
-                        }(),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
+            ),
+          ],
         );
       },
     );
@@ -725,9 +1071,27 @@ class _HomePageState extends State<HomePage>
     );
   }
 
+  bool _assistantBackgroundActive(BuildContext context) {
+    final bgRaw =
+        (context.watch<AssistantProvider>().currentAssistant?.background ?? '')
+            .trim();
+    if (bgRaw.isEmpty) return false;
+    if (bgRaw.startsWith('http')) return true;
+    try {
+      final fixed = SandboxPathResolver.fix(bgRaw);
+      return File(fixed).existsSync();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  double _chatTopOverlayInset(BuildContext context) {
+    return kToolbarHeight + MediaQuery.paddingOf(context).top;
+  }
+
   /// Map persisted truncateIndex (raw message count) to collapsed index.
   int _computeTruncCollapsedIndex() {
-    final int truncRaw = _controller.currentConversation?.truncateIndex ?? -1;
+    final int truncRaw = _controller.chatController.loadedWindowTruncateIndex();
     if (truncRaw <= 0) return -1;
     final rawMessages = _controller.messages;
     final seen = <String>{};
@@ -744,8 +1108,22 @@ class _HomePageState extends State<HomePage>
 
   Widget _buildMessageListView(
     BuildContext context, {
+    required double topContentPadding,
+    required double bottomContentPadding,
     required EdgeInsetsGeometry dividerPadding,
   }) {
+    if (_controller.isTemporaryConversation &&
+        _controller.chatController.collapsedMessages.isEmpty) {
+      return _TemporaryConversationEmptyState(
+        topContentPadding: topContentPadding,
+        bottomContentPadding: bottomContentPadding,
+      );
+    }
+
+    final settings = context.watch<SettingsProvider>();
+    final suggestionsEnabled =
+        settings.suggestionModelProvider != null &&
+        settings.suggestionModelId != null;
     return BackdropGroup(
       backdropKey: _messageListBackdropKey,
       child: MessageListView(
@@ -763,10 +1141,20 @@ class _HomePageState extends State<HomePage>
         translations: _buildTranslationUiStates(),
         selecting: _controller.selecting,
         selectedItems: _controller.selectedItems,
+        suggestions: suggestionsEnabled
+            ? (_controller.currentConversation?.chatSuggestions ??
+                  const <String>[])
+            : const <String>[],
+        topContentPadding: topContentPadding,
+        bottomContentPadding: bottomContentPadding,
         dividerPadding: dividerPadding,
         streamingContentNotifier: _controller.streamingContentNotifier,
         spotlightMessageId: _controller.spotlightMessageId,
         spotlightToken: _controller.spotlightToken,
+        hasMoreBefore: _controller.chatController.hasMoreBefore,
+        onLoadMoreBefore: _controller.loadMoreBefore,
+        hasMoreAfter: _controller.chatController.hasMoreAfter,
+        onLoadMoreAfter: _controller.loadMoreAfter,
         onVersionChange: (groupId, version) async {
           await _controller.setSelectedVersion(groupId, version);
         },
@@ -786,7 +1174,16 @@ class _HomePageState extends State<HomePage>
         onForkConversation: (message) => _controller.forkConversation(message),
         onShareMessage: (index, messages) =>
             _controller.shareMessage(index, messages),
+        onSelectMessages: (index, messages) =>
+            _controller.startMessageSelection(
+              messageIndex: index,
+              messageList: messages,
+              mode: ChatSelectionMode.delete,
+            ),
         onSpeakMessage: (message) => _controller.speakMessage(message),
+        onSuggestionTap: (suggestion) => _controller.sendSuggestion(suggestion),
+        onRecoveredAskUserAnswer: (message, part, result) =>
+            _controller.submitRecoveredAskUserAnswer(message, part, result),
         onToggleSelection: (messageId, selected) {
           _controller.toggleSelection(messageId, selected);
         },
@@ -814,6 +1211,10 @@ class _HomePageState extends State<HomePage>
       isToolModel: _controller.isToolModel,
       isReasoningModel: _controller.isReasoningModel,
       isReasoningEnabled: _controller.isReasoningEnabled,
+      conversationId: _controller.currentConversation?.id,
+      sendButtonTooltip: _controller.isUserMessageEditActive
+          ? AppLocalizations.of(context)!.messageEditPageSaveAndSend
+          : null,
       onMore: _toggleTools,
       onSelectModel: () => showModelSelectSheet(context),
       onLongPressSelectModel: () {
@@ -880,22 +1281,7 @@ class _HomePageState extends State<HomePage>
         final sp = context.read<SettingsProvider>();
         await sp.setOcrEnabled(!sp.ocrEnabled);
       },
-      onOpenMiniMap: () async {
-        final collapsed = _controller.collapseVersions(_controller.messages);
-        String? selectedId;
-        if (PlatformUtils.isDesktop) {
-          selectedId = await showDesktopMiniMapPopover(
-            context,
-            anchorKey: _inputBarKey,
-            messages: collapsed,
-          );
-        } else {
-          selectedId = await showMiniMapSheet(context, collapsed);
-        }
-        if (selectedId != null && selectedId.isNotEmpty) {
-          await _controller.scrollToMessageId(selectedId);
-        }
-      },
+      onOpenMiniMap: _openMiniMap,
       onPickCamera: _controller.onPickCamera,
       onPickPhotos: _controller.onPickPhotos,
       onUploadFiles: _controller.onPickFiles,
@@ -904,21 +1290,61 @@ class _HomePageState extends State<HomePage>
       onLongPressLearning: _showLearningPromptSheet,
       onClearContext: _controller.clearContext,
       onCompressContext: _handleDesktopCompressContext,
+      backgroundImageActive: _assistantBackgroundActive(context),
     );
   }
 
   Widget _buildScrollButtons() {
     return Builder(
       builder: (context) {
-        final showSetting = context
-            .watch<SettingsProvider>()
-            .showMessageNavButtons;
+        final settings = context.watch<SettingsProvider>();
         if (_controller.selecting) return const SizedBox.shrink();
-        if (!showSetting || _controller.messages.isEmpty) {
+        if (_controller.messages.isEmpty) {
           return const SizedBox.shrink();
         }
+        var visible = _controller.scrollCtrl.showNavButtons;
+        var hoverEnabled = false;
+        if (_controller.isDesktopPlatform) {
+          switch (settings.desktopMessageNavButtonsMode) {
+            case DesktopMessageNavButtonsMode.always:
+              visible = true;
+              break;
+            case DesktopMessageNavButtonsMode.scroll:
+              visible = _controller.scrollCtrl.showNavButtons;
+              break;
+            case DesktopMessageNavButtonsMode.hover:
+              visible = _scrollNavHovering;
+              hoverEnabled = true;
+              break;
+            case DesktopMessageNavButtonsMode.scrollAndHover:
+              visible =
+                  _controller.scrollCtrl.showNavButtons || _scrollNavHovering;
+              hoverEnabled = true;
+              break;
+            case DesktopMessageNavButtonsMode.never:
+              return const SizedBox.shrink();
+          }
+        } else {
+          switch (settings.mobileMessageNavButtonsMode) {
+            case MobileMessageNavButtonsMode.always:
+              visible = true;
+              break;
+            case MobileMessageNavButtonsMode.scroll:
+              visible = _controller.scrollCtrl.showNavButtons;
+              break;
+            case MobileMessageNavButtonsMode.never:
+              return const SizedBox.shrink();
+          }
+        }
         return ScrollNavButtonsPanel(
-          visible: _controller.scrollCtrl.showNavButtons,
+          visible: visible,
+          hoverEnabled: hoverEnabled,
+          onHoverChanged: hoverEnabled
+              ? (hovering) {
+                  if (_scrollNavHovering == hovering) return;
+                  setState(() => _scrollNavHovering = hovering);
+                }
+              : null,
           bottomOffset: _controller.inputBarHeight + 12,
           onScrollToTop: _controller.scrollToTop,
           onPreviousMessage: _controller.jumpToPreviousQuestion,
@@ -927,6 +1353,47 @@ class _HomePageState extends State<HomePage>
         );
       },
     );
+  }
+
+  Widget _buildForegroundOverlay(BuildContext context) {
+    final editState = _controller.userMessageEditState;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        _buildScrollButtons(),
+        UserMessageEditOverlay(
+          visible: editState != null && !_controller.selecting,
+          previewText: editState?.previewText ?? '',
+          topInset: _chatTopOverlayInset(context),
+          bottomInset: _controller.inputBarHeight,
+          onCancel: _controller.cancelUserMessageEdit,
+          onSaveOnly: () {
+            unawaited(_controller.saveUserMessageEditOnly());
+          },
+          onPreviewTap: _controller.focusUserMessageEditInput,
+        ),
+      ],
+    );
+  }
+
+  Future<void> _openMiniMap() async {
+    final collapsed = _controller.allCollapsedMessagesForCurrentConversation();
+    if (collapsed.isEmpty) return;
+
+    String? selectedId;
+    if (PlatformUtils.isDesktop) {
+      selectedId = await showDesktopMiniMapPopover(
+        context,
+        anchorKey: _inputBarKey,
+        messages: collapsed,
+      );
+    } else {
+      selectedId = await showMiniMapSheet(context, collapsed);
+    }
+    if (!mounted) return;
+    if (selectedId != null && selectedId.isNotEmpty) {
+      await _controller.scrollToMessageId(selectedId);
+    }
   }
 
   Widget _wrapWithDropTarget(Widget child) {
@@ -973,9 +1440,9 @@ class _HomePageState extends State<HomePage>
                     ),
                     child: Text(
                       AppLocalizations.of(context)!.homePageDropToUpload,
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 16,
-                        fontWeight: FontWeight.w600,
+                        fontWeight: AppFontWeights.semibold,
                       ),
                     ),
                   ),
@@ -1093,7 +1560,6 @@ class _HomePageState extends State<HomePage>
 
   void _showContextManagementSheet() async {
     final cs = Theme.of(context).colorScheme;
-    final l10n = AppLocalizations.of(context)!;
     await showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -1107,23 +1573,9 @@ class _HomePageState extends State<HomePage>
           child: ContextManagementSheet(
             clearLabel: _controller.clearContextLabel(),
             onCompress: () async {
-              Navigator.of(ctx).maybePop();
-              showAppSnackBar(
-                context,
-                message: l10n.compressingContext,
-                duration: const Duration(seconds: 30),
-              );
-              final error = await _controller.compressContext();
-              AppSnackBarManager().dismissAll();
-              if (error != null && mounted) {
-                showAppSnackBar(
-                  context,
-                  message: error == 'no_messages'
-                      ? l10n.compressContextNoMessages
-                      : l10n.compressContextFailed,
-                  type: NotificationType.error,
-                );
-              }
+              await Navigator.of(ctx).maybePop();
+              if (!mounted) return;
+              await _showCompressContextOptions();
             },
             onClear: () async {
               Navigator.of(ctx).maybePop();
@@ -1136,21 +1588,42 @@ class _HomePageState extends State<HomePage>
   }
 
   void _handleDesktopCompressContext() async {
-    final l10n = AppLocalizations.of(context)!;
-    showAppSnackBar(
-      context,
-      message: l10n.compressingContext,
-      duration: const Duration(seconds: 30),
+    await _showCompressContextOptions();
+  }
+
+  Future<void> _showCompressContextOptions() async {
+    final options = await showDialog<CompressContextOptions>(
+      context: context,
+      barrierDismissible: true,
+      builder: (_) => const _CompressContextOptionsDialog(),
     );
-    final error = await _controller.compressContext();
-    AppSnackBarManager().dismissAll();
+    if (options == null || !mounted) return;
+
+    final l10n = AppLocalizations.of(context)!;
+    unawaited(
+      showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => LoadingDialogCard(label: l10n.compressingContext),
+      ),
+    );
+
+    String? error;
+    try {
+      error = await _controller.compressContext(options: options);
+    } catch (e) {
+      error = e.toString();
+    } finally {
+      if (mounted) {
+        Navigator.of(context, rootNavigator: true).maybePop();
+      }
+    }
     if (error != null && mounted) {
       showAppSnackBar(
         context,
-        message: error == 'no_messages'
-            ? l10n.compressContextNoMessages
-            : l10n.compressContextFailed,
+        message: _compressContextErrorMessage(l10n, error),
         type: NotificationType.error,
+        duration: const Duration(seconds: 6),
       );
     }
   }
@@ -1225,7 +1698,7 @@ class _HomePageState extends State<HomePage>
             onPressed: () => Navigator.of(ctx).pop(true),
             child: Text(
               l10n.homePageDelete,
-              style: const TextStyle(color: Colors.red),
+              style: TextStyle(color: Colors.red),
             ),
           ),
         ],
@@ -1242,6 +1715,59 @@ class _HomePageState extends State<HomePage>
     }
 
     await _controller.deleteMessage(message: message, byGroup: byGroup);
+  }
+
+  Future<void> _handleDeleteSelectedMessages(
+    BuildContext context, {
+    required bool deleteAllVersions,
+  }) async {
+    final l10n = AppLocalizations.of(context)!;
+    if (_controller.selectedItems.isEmpty) {
+      showAppSnackBar(
+        context,
+        message: l10n.chatSelectionSelectMessagesToDelete,
+        type: NotificationType.info,
+      );
+      return;
+    }
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(
+          deleteAllVersions
+              ? l10n.homePageDeleteAllVersions
+              : l10n.chatSelectionDeleteSelected,
+        ),
+        content: Text(
+          deleteAllVersions
+              ? l10n.chatSelectionDeleteSelectedAllVersionsConfirm(
+                  _controller.selectedItems.length,
+                )
+              : l10n.chatSelectionDeleteSelectedConfirm(
+                  _controller.selectedItems.length,
+                ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text(l10n.homePageCancel),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text(
+              l10n.homePageDelete,
+              style: TextStyle(color: Colors.red),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+
+    await _controller.deleteSelectedMessages(
+      deleteAllVersions: deleteAllVersions,
+    );
   }
 
   Map<String, TranslationUiState> _buildTranslationUiStates() {

@@ -1,11 +1,15 @@
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:flutter/foundation.dart';
+import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
-import 'dart:io';
 import '../../utils/sandbox_path_resolver.dart';
 import '../models/assistant.dart';
 import '../models/assistant_regex.dart';
 import '../models/preset_message.dart';
+import '../services/chat/chat_service.dart';
 import '../../l10n/app_localizations.dart';
 import '../../utils/avatar_cache.dart';
 import '../../utils/app_directories.dart';
@@ -13,9 +17,11 @@ import '../../utils/app_directories.dart';
 class AssistantProvider extends ChangeNotifier {
   static const String _assistantsKey = 'assistants_v1';
   static const String _currentAssistantKey = 'current_assistant_id_v1';
+  static const String _legacySearchEnabledKey = 'search_enabled_v1';
 
   final List<Assistant> _assistants = <Assistant>[];
   String? _currentAssistantId;
+  final ChatService? chatService;
 
   List<Assistant> get assistants => List.unmodifiable(_assistants);
   String? get currentAssistantId => _currentAssistantId;
@@ -26,7 +32,9 @@ class AssistantProvider extends ChangeNotifier {
     return null;
   }
 
-  AssistantProvider() {
+  bool get currentSearchEnabled => currentAssistant?.searchEnabled ?? false;
+
+  AssistantProvider({this.chatService}) {
     _load();
   }
 
@@ -34,11 +42,18 @@ class AssistantProvider extends ChangeNotifier {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(_assistantsKey);
     if (raw != null && raw.isNotEmpty) {
+      final legacySearchEnabled = prefs.getBool(_legacySearchEnabledKey);
+      final migrated = _decodeAssistantsWithLegacySearch(
+        raw,
+        legacySearchEnabled: legacySearchEnabled,
+      );
+      bool migratedSearchEnabled = false;
       _assistants
         ..clear()
-        ..addAll(Assistant.decodeList(raw));
+        ..addAll(migrated.assistants);
+      migratedSearchEnabled = migrated.didApplyLegacySearch;
       // Fix any sandboxed local paths (avatars/backgrounds) imported from other platforms
-      bool changed = false;
+      bool changed = migratedSearchEnabled;
       for (int i = 0; i < _assistants.length; i++) {
         final a = _assistants[i];
         String? av = a.avatar;
@@ -85,11 +100,42 @@ class AssistantProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  _AssistantDecodeResult _decodeAssistantsWithLegacySearch(
+    String raw, {
+    required bool? legacySearchEnabled,
+  }) {
+    try {
+      final decoded = jsonDecode(raw) as List<dynamic>;
+      bool didApplyLegacySearch = false;
+      final assistants = [
+        for (final e in decoded)
+          if (e is Map)
+            (() {
+              final json = e.cast<String, dynamic>();
+              if (legacySearchEnabled != null &&
+                  !json.containsKey('searchEnabled')) {
+                json['searchEnabled'] = legacySearchEnabled;
+                didApplyLegacySearch = true;
+              }
+              return Assistant.fromJson(json);
+            })(),
+      ];
+      return _AssistantDecodeResult(
+        assistants: assistants,
+        didApplyLegacySearch: didApplyLegacySearch,
+      );
+    } catch (_) {
+      return const _AssistantDecodeResult(
+        assistants: <Assistant>[],
+        didApplyLegacySearch: false,
+      );
+    }
+  }
+
   Assistant _defaultAssistant(AppLocalizations l10n) => Assistant(
     id: const Uuid().v4(),
     name: l10n.assistantProviderDefaultAssistantName,
     systemPrompt: '',
-    deletable: false,
     thinkingBudget: null,
     temperature: 0.6,
     topP: null,
@@ -114,7 +160,6 @@ class AssistantProvider extends ChangeNotifier {
           '{device_info}',
           '{system_version}',
         ),
-        deletable: false,
         temperature: 0.6,
         topP: null,
       ),
@@ -182,6 +227,67 @@ class AssistantProvider extends ChangeNotifier {
     } catch (_) {
       return rawPath;
     }
+  }
+
+  Future<String?> _copyLocalAssetToManagedDirectory(
+    String? rawPath, {
+    required Future<Directory> Function() directoryAsync,
+    required String filenamePrefix,
+    required String id,
+  }) async {
+    final raw = (rawPath ?? '').trim();
+    if (raw.isEmpty || raw.startsWith('http') || raw.startsWith('data:')) {
+      return rawPath;
+    }
+    if (!(raw.startsWith('/') || raw.contains(':'))) return rawPath;
+
+    final fixed = SandboxPathResolver.fix(raw);
+    final src = File(fixed);
+    if (!await src.exists()) return rawPath;
+
+    final managedDir = await directoryAsync();
+    final managedRoot = p.normalize(managedDir.absolute.path);
+    final sourcePath = p.normalize(src.absolute.path);
+    if (p.isWithin(managedRoot, sourcePath)) return fixed;
+
+    if (!await managedDir.exists()) {
+      await managedDir.create(recursive: true);
+    }
+
+    var ext = p.extension(fixed).toLowerCase();
+    if (ext.isEmpty || ext.length > 7) ext = '.jpg';
+    final safeId = id.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
+    final dest = File(
+      p.join(
+        managedDir.path,
+        '${filenamePrefix}_${safeId}_${DateTime.now().millisecondsSinceEpoch}$ext',
+      ),
+    );
+    await src.copy(dest.path);
+    return dest.path;
+  }
+
+  Future<void> _deleteManagedFileIfOwned(
+    String? rawPath, {
+    required Future<Directory> Function() directoryAsync,
+    required String? replacementPath,
+  }) async {
+    final raw = (rawPath ?? '').trim();
+    if (raw.isEmpty) return;
+    try {
+      final dir = await directoryAsync();
+      final root = p.normalize(dir.absolute.path);
+      final targetFile = File(raw);
+      final target = p.normalize(targetFile.absolute.path);
+      if (!p.isWithin(root, target)) return;
+      if (replacementPath != null &&
+          p.equals(target, p.normalize(File(replacementPath).absolute.path))) {
+        return;
+      }
+      if (await targetFile.exists()) {
+        await targetFile.delete();
+      }
+    } catch (_) {}
   }
 
   Future<void> _persist() async {
@@ -259,8 +365,8 @@ class AssistantProvider extends ChangeNotifier {
       name: _buildCopyName(source, l10n),
       avatar: avatarCopy,
       background: backgroundCopy,
-      deletable: true,
       mcpServerIds: List<String>.of(source.mcpServerIds),
+      localToolIds: List<String>.of(source.localToolIds),
       customHeaders: source.customHeaders
           .map((e) => Map<String, String>.from(e))
           .toList(),
@@ -298,55 +404,32 @@ class AssistantProvider extends ChangeNotifier {
 
     var next = updated;
 
-    // If avatar changed and is a local file path (from gallery/cache),
-    // copy it to persistent Documents/avatars and store that path.
     try {
       final prev = _assistants[idx];
       final raw = (updated.avatar ?? '').trim();
       final prevRaw = (prev.avatar ?? '').trim();
       final changed = raw != prevRaw;
-      final isLocalPath =
-          raw.isNotEmpty &&
-          (raw.startsWith('/') || raw.contains(':')) &&
-          !raw.startsWith('http');
-      // Skip if it's already under our avatars folder
-      if (changed &&
-          isLocalPath &&
-          !raw.contains('/avatars/') &&
-          !raw.contains('\\avatars\\')) {
-        final fixedInput = SandboxPathResolver.fix(raw);
-        final src = File(fixedInput);
-        if (await src.exists()) {
-          final avatarsDir = await AppDirectories.getAvatarsDirectory();
-          if (!await avatarsDir.exists()) {
-            await avatarsDir.create(recursive: true);
-          }
-          String ext = '';
-          final dot = fixedInput.lastIndexOf('.');
-          if (dot != -1 && dot < fixedInput.length - 1) {
-            ext = fixedInput.substring(dot + 1).toLowerCase();
-            if (ext.length > 6) ext = 'jpg';
-          } else {
-            ext = 'jpg';
-          }
-          final filename =
-              'assistant_${updated.id}_${DateTime.now().millisecondsSinceEpoch}.$ext';
-          final dest = File('${avatarsDir.path}/$filename');
-          await src.copy(dest.path);
 
-          // Optionally remove old stored avatar if it lives in our avatars folder
-          if (prevRaw.isNotEmpty &&
-              (prevRaw.contains('/avatars/') ||
-                  prevRaw.contains('\\avatars\\'))) {
-            try {
-              final old = File(prevRaw);
-              if (await old.exists() && old.path != dest.path) {
-                await old.delete();
-              }
-            } catch (_) {}
-          }
-
-          next = updated.copyWith(avatar: dest.path);
+      if (changed) {
+        final avatarPath = await _copyLocalAssetToManagedDirectory(
+          raw,
+          directoryAsync: AppDirectories.getAvatarsDirectory,
+          filenamePrefix: 'assistant',
+          id: updated.id,
+        );
+        if (avatarPath != updated.avatar) {
+          await _deleteManagedFileIfOwned(
+            prevRaw,
+            directoryAsync: AppDirectories.getAvatarsDirectory,
+            replacementPath: avatarPath,
+          );
+          next = updated.copyWith(avatar: avatarPath);
+        } else if (raw.isEmpty) {
+          await _deleteManagedFileIfOwned(
+            prevRaw,
+            directoryAsync: AppDirectories.getAvatarsDirectory,
+            replacementPath: null,
+          );
         }
       }
 
@@ -361,56 +444,27 @@ class AssistantProvider extends ChangeNotifier {
       final bgRaw = (updated.background ?? '').trim();
       final prevBgRaw = (prev.background ?? '').trim();
       final bgChanged = bgRaw != prevBgRaw;
-      final bgIsLocal =
-          bgRaw.isNotEmpty &&
-          (bgRaw.startsWith('/') || bgRaw.contains(':')) &&
-          !bgRaw.startsWith('http');
-      if (bgChanged &&
-          bgIsLocal &&
-          !bgRaw.contains('/images/') &&
-          !bgRaw.contains('\\images\\')) {
-        final fixedBg = SandboxPathResolver.fix(bgRaw);
-        final srcBg = File(fixedBg);
-        if (await srcBg.exists()) {
-          final imagesDir = await AppDirectories.getImagesDirectory();
-          if (!await imagesDir.exists()) {
-            await imagesDir.create(recursive: true);
-          }
-          String ext = '';
-          final dot = fixedBg.lastIndexOf('.');
-          if (dot != -1 && dot < fixedBg.length - 1) {
-            ext = fixedBg.substring(dot + 1).toLowerCase();
-            if (ext.length > 6) ext = 'jpg';
-          } else {
-            ext = 'jpg';
-          }
-          final filename =
-              'background_${updated.id}_${DateTime.now().millisecondsSinceEpoch}.$ext';
-          final destBg = File('${imagesDir.path}/$filename');
-          await srcBg.copy(destBg.path);
-
-          // Clean old stored background if it lived in images/
-          if (prevBgRaw.isNotEmpty &&
-              (prevBgRaw.contains('/images/') ||
-                  prevBgRaw.contains('\\images\\'))) {
-            try {
-              final oldBg = File(prevBgRaw);
-              if (await oldBg.exists() && oldBg.path != destBg.path) {
-                await oldBg.delete();
-              }
-            } catch (_) {}
-          }
-
-          next = next.copyWith(background: destBg.path);
+      if (bgChanged) {
+        final backgroundPath = await _copyLocalAssetToManagedDirectory(
+          bgRaw,
+          directoryAsync: AppDirectories.getImagesDirectory,
+          filenamePrefix: 'background',
+          id: updated.id,
+        );
+        if (backgroundPath != updated.background) {
+          await _deleteManagedFileIfOwned(
+            prevBgRaw,
+            directoryAsync: AppDirectories.getImagesDirectory,
+            replacementPath: backgroundPath,
+          );
+          next = next.copyWith(background: backgroundPath);
+        } else if (bgRaw.isEmpty) {
+          await _deleteManagedFileIfOwned(
+            prevBgRaw,
+            directoryAsync: AppDirectories.getImagesDirectory,
+            replacementPath: null,
+          );
         }
-      } else if (bgChanged && bgRaw.isEmpty && prevBgRaw.contains('/images/')) {
-        // If background cleared, optionally remove previous stored file
-        try {
-          final oldBg = File(prevBgRaw);
-          if (await oldBg.exists()) {
-            await oldBg.delete();
-          }
-        } catch (_) {}
       }
     } catch (_) {
       // On any failure, fall back to the provided value unchanged.
@@ -419,6 +473,12 @@ class AssistantProvider extends ChangeNotifier {
     _assistants[idx] = next;
     await _persist();
     notifyListeners();
+  }
+
+  Future<void> setSearchEnabledForCurrentAssistant(bool enabled) async {
+    final a = currentAssistant;
+    if (a == null || a.searchEnabled == enabled) return;
+    await updateAssistant(a.copyWith(searchEnabled: enabled));
   }
 
   Future<void> reorderAssistantRegex({
@@ -443,6 +503,9 @@ class AssistantProvider extends ChangeNotifier {
     if (idx == -1) return false;
     // Do not allow deleting the last remaining assistant
     if (_assistants.length <= 1) return false;
+
+    await chatService?.deleteConversationsForAssistant(id);
+
     final removingCurrent = _assistants[idx].id == _currentAssistantId;
     _assistants.removeAt(idx);
     if (removingCurrent) {
@@ -521,4 +584,14 @@ class AssistantProvider extends ChangeNotifier {
     notifyListeners();
     await _persist();
   }
+}
+
+class _AssistantDecodeResult {
+  const _AssistantDecodeResult({
+    required this.assistants,
+    required this.didApplyLegacySearch,
+  });
+
+  final List<Assistant> assistants;
+  final bool didApplyLegacySearch;
 }

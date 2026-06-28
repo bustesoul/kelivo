@@ -165,7 +165,12 @@ abstract class BuiltInToolsHelper {
   }
 
   static bool isClaudeBuiltInSearchSupportedModel(String? modelId) {
+    final normalized = _normalizedModelId(modelId);
+    if (normalized.contains('mythos')) return true;
     const supported = <String>{
+      'claude-fable-5',
+      'claude-opus-4-8',
+      'claude-opus-4-7',
       'claude-opus-4-6',
       'claude-sonnet-4-5-20250929',
       'claude-sonnet-4-20250514',
@@ -176,7 +181,17 @@ abstract class BuiltInToolsHelper {
       'claude-opus-4-1-20250805',
       'claude-opus-4-20250514',
     };
-    return supported.contains(_normalizedModelId(modelId));
+    return supported.contains(normalized);
+  }
+
+  static bool isClaudeDynamicWebSearchSupportedModel(String? modelId) {
+    final normalized = _normalizedModelId(modelId);
+    return normalized.contains('mythos') ||
+        normalized == 'claude-fable-5' ||
+        normalized == 'claude-opus-4-8' ||
+        normalized == 'claude-opus-4-7' ||
+        normalized == 'claude-opus-4-6' ||
+        normalized == 'claude-sonnet-4-6';
   }
 
   static bool isOpenAIResponsesBuiltInSearchSupportedModel(String? modelId) {
@@ -187,6 +202,23 @@ abstract class BuiltInToolsHelper {
         m == 'o3' ||
         m.startsWith('o3-') ||
         m.startsWith('gpt-5');
+  }
+
+  static bool isOpenRouterProvider(ProviderConfig? cfg) {
+    if (cfg == null) return false;
+    final host = Uri.tryParse(cfg.baseUrl)?.host.toLowerCase() ?? '';
+    final providerId = cfg.id.toLowerCase();
+    return host.contains('openrouter.ai') || providerId.contains('openrouter');
+  }
+
+  static bool isDeepSeekProvider(ProviderConfig? cfg) {
+    if (cfg == null) return false;
+    final host = Uri.tryParse(cfg.baseUrl)?.host.toLowerCase() ?? '';
+    final providerId = cfg.id.toLowerCase();
+    final providerName = cfg.name.toLowerCase();
+    return host.contains('deepseek.com') ||
+        providerId.contains('deepseek') ||
+        providerName.contains('deepseek');
   }
 
   static bool isDashScopeChatBuiltInSearchSupportedModel(String? modelId) {
@@ -237,6 +269,16 @@ abstract class BuiltInToolsHelper {
     final m = _normalizedModelId(modelId);
     return _matchesExactOrSnapshot(
           m,
+          alias: 'qwen3.6-plus',
+          minSnapshot: '2026-04-02',
+        ) ||
+        _matchesExactOrSnapshot(
+          m,
+          alias: 'qwen3.6-flash',
+          minSnapshot: '2026-04-16',
+        ) ||
+        _matchesExactOrSnapshot(
+          m,
           alias: 'qwen3.5-plus',
           minSnapshot: '2026-02-15',
         ) ||
@@ -269,8 +311,12 @@ abstract class BuiltInToolsHelper {
       case ProviderKind.google:
         return true;
       case ProviderKind.claude:
+        if (isDeepSeekProvider(cfg)) return true;
         return isClaudeBuiltInSearchSupportedModel(upstreamModelId);
       case ProviderKind.openai:
+        if (isOpenRouterProvider(cfg)) {
+          return cfg.useResponseApi != true;
+        }
         if (isGrokModel(upstreamModelId)) return true;
         if (cfg.useResponseApi == true) {
           if (isOpenAIResponsesBuiltInSearchSupportedModel(upstreamModelId)) {
@@ -303,6 +349,52 @@ abstract class BuiltInToolsHelper {
     if (!builtInSet.contains(BuiltInToolNames.search)) return false;
     if (!requireSupport) return true;
     return supportsBuiltInSearchForModel(cfg: cfg, modelId: modelId);
+  }
+
+  static bool supportsClaudeDynamicWebSearchForModel({
+    required ProviderConfig? cfg,
+    required String? modelId,
+  }) {
+    if (cfg == null || (modelId ?? '').trim().isEmpty) return false;
+    final kind = ProviderConfig.classify(
+      cfg.id,
+      explicitType: cfg.providerType,
+    );
+    if (kind != ProviderKind.claude) return false;
+    final upstreamModelId = BuiltInToolNames.effectiveModelId(
+      cfg: cfg,
+      modelId: modelId,
+    );
+    return !isDeepSeekProvider(cfg) &&
+        isClaudeDynamicWebSearchSupportedModel(upstreamModelId);
+  }
+
+  static bool isClaudeDynamicWebSearchEnabled({
+    required ProviderConfig? cfg,
+    required String? modelId,
+  }) {
+    if (!supportsClaudeDynamicWebSearchForModel(cfg: cfg, modelId: modelId)) {
+      return false;
+    }
+    if (cfg == null || modelId == null || modelId.trim().isEmpty) {
+      return false;
+    }
+    final rawOv = cfg.modelOverrides[modelId];
+    final ov = rawOv is Map ? rawOv : null;
+    final rawWs = ov?['webSearch'];
+    if (rawWs is! Map) return false;
+    final ws = rawWs.cast<String, dynamic>();
+    return ws['toolVersion'] == 'web_search_20260209' ||
+        ws['tool_version'] == 'web_search_20260209';
+  }
+
+  static String claudeBuiltInSearchToolType({
+    required ProviderConfig? cfg,
+    required String? modelId,
+  }) {
+    return isClaudeDynamicWebSearchEnabled(cfg: cfg, modelId: modelId)
+        ? 'web_search_20260209'
+        : 'web_search_20250305';
   }
 
   static Map<String, dynamic> dashScopeSearchOptionsFromOverride(
@@ -373,6 +465,10 @@ abstract class BuiltInToolsHelper {
         // OpenAI requires Responses API, or Grok models
         if (useResponseApi &&
             isOpenAIResponsesBuiltInSearchSupportedModel(modelId)) {
+          return true;
+        }
+        if (useResponseApi &&
+            isDashScopeResponsesBuiltInSearchSupportedModel(modelId)) {
           return true;
         }
         if (isGrokModel(modelId)) return true;

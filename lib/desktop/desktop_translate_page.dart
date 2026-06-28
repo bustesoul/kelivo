@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import 'package:Kelivo/theme/app_font_weights.dart';
 
 import '../icons/lucide_adapter.dart' as lucide;
 import '../l10n/app_localizations.dart';
@@ -120,7 +121,11 @@ class _DesktopTranslatePageState extends State<DesktopTranslatePage> {
   Future<void> _pickModel() async {
     if (_translating) return; // avoid switching mid-stream
     final settings = context.read<SettingsProvider>();
-    final sel = await showModelSelector(context);
+    final sel = await showModelSelector(
+      context,
+      initialProviderKey: _modelProviderKey,
+      initialModelId: _modelId,
+    );
     if (!mounted) return;
     if (sel == null) return;
 
@@ -228,7 +233,7 @@ class _DesktopTranslatePageState extends State<DesktopTranslatePage> {
             l10n.desktopNavTranslateTooltip, // 显示“翻译”
             style: TextStyle(
               fontSize: 14,
-              fontWeight: FontWeight.w600,
+              fontWeight: AppFontWeights.semibold,
               color: cs.onSurface,
               decoration: TextDecoration.none,
             ),
@@ -311,10 +316,7 @@ class _DesktopTranslatePageState extends State<DesktopTranslatePage> {
                                     isCollapsed: true,
                                     contentPadding: const EdgeInsets.all(14),
                                   ),
-                                  style: const TextStyle(
-                                    fontSize: 14.5,
-                                    height: 1.4,
-                                  ),
+                                  style: TextStyle(fontSize: 14.5, height: 1.4),
                                 ),
                               ),
                             ),
@@ -349,10 +351,7 @@ class _DesktopTranslatePageState extends State<DesktopTranslatePage> {
                                     isCollapsed: true,
                                     contentPadding: const EdgeInsets.all(14),
                                   ),
-                                  style: const TextStyle(
-                                    fontSize: 14.5,
-                                    height: 1.4,
-                                  ),
+                                  style: TextStyle(fontSize: 14.5, height: 1.4),
                                 ),
                               ),
                             ),
@@ -526,7 +525,7 @@ class _LanguageDropdownState extends State<_LanguageDropdown> {
                   children: [
                     Text(
                       selected.flag,
-                      style: const TextStyle(fontSize: 16, height: 1),
+                      style: TextStyle(fontSize: 16, height: 1),
                     ),
                     const SizedBox(width: 8),
                     ConstrainedBox(
@@ -765,7 +764,7 @@ class _LangOptionTileState extends State<_LangOptionTile> {
               children: [
                 Text(
                   widget.option.flag,
-                  style: const TextStyle(fontSize: 16, height: 1),
+                  style: TextStyle(fontSize: 16, height: 1),
                 ),
                 const SizedBox(width: 8),
                 Expanded(
@@ -780,8 +779,8 @@ class _LangOptionTileState extends State<_LangOptionTile> {
                       fontSize: 14,
                       color: cs.onSurface.withValues(alpha: 0.88),
                       fontWeight: widget.selected
-                          ? FontWeight.w600
-                          : FontWeight.w400,
+                          ? AppFontWeights.semibold
+                          : AppFontWeights.regular,
                     ),
                   ),
                 ),
@@ -887,7 +886,7 @@ class _TranslateButtonState extends State<_TranslateButton> {
                         style: TextStyle(
                           color: fg,
                           fontSize: 13.5,
-                          fontWeight: FontWeight.w600,
+                          fontWeight: AppFontWeights.semibold,
                         ),
                       ),
                     ],
@@ -903,7 +902,7 @@ class _TranslateButtonState extends State<_TranslateButton> {
                         style: TextStyle(
                           color: fg,
                           fontSize: 13.5,
-                          fontWeight: FontWeight.w600,
+                          fontWeight: AppFontWeights.semibold,
                         ),
                       ),
                     ],
@@ -968,7 +967,7 @@ class _ModelPickerButton extends StatelessWidget {
                   modelId!,
                   style: TextStyle(
                     fontSize: 12.5,
-                    fontWeight: FontWeight.w500,
+                    fontWeight: AppFontWeights.medium,
                     color: cs.onSurface.withValues(alpha: 0.85),
                   ),
                 ),

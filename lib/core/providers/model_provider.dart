@@ -17,7 +17,7 @@ class ModelRegistry {
   // Vision-capable models (text + image input)
   static final RegExp vision = RegExp(
     // GPT family incl. 4o, 4.1, 5 (exclude gpt-5-chat), and OpenAI o* series
-    r'(gpt-4o|gpt-4\.1|gpt-5(?!-chat)|o\d|gemini|claude|qwen-?3([-.])5|kimi-k2([-.])5|doubao.+1([-.])(?:6|8)|grok-4|step-3|intern-s1)',
+    r'(gpt-4o|gpt-4\.1|gpt-5(?!-chat)|o\d|gemini|claude|qwen-?3([-.])5|kimi-k2([-.])(?:5|6|7)|doubao.+1([-.])(?:6|8)|grok-4|step-3|intern-s1|minimax-m3(?:$|[/_:@])|mimo-v2(?:-omni(?:$|[/_:@])|\.5(?:$|[/_:@]))|sensenova-6\.7-flash-lite)',
     caseSensitive: false,
   );
   // Tool-using models
@@ -25,10 +25,11 @@ class ModelRegistry {
     (r'(gpt-4o|gpt-4\.1|gpt-oss|gpt-5(?!-chat)|o\d|'
             r'gemini|claude|'
             r'qwen-?3|doubao.+1([-.])(?:6|8)|grok-4|kimi-k2|'
-            r'step-3|intern-s1|glm-4([-.])(?:5|6|7)|glm-5|minimax-m2|'
-            r'deepseek-(?:r1|v3|chat|v3\.1|v3\.2)|'
+            r'step-3|intern-s1|glm-4([-.])(?:5|6|7)|glm-5|minimax-(?:m2|m3)|'
+            r'deepseek-(?:r1|v3|chat|v3\.1|v3\.2|v4)|'
             r'deepseek-reasoner|'
-            r'mimo-v2'
+            r'mimo-v2|'
+            r'sensenova-6\.7-flash-lite'
             r')')
         .replaceAll(' ', ''),
     caseSensitive: false,
@@ -37,10 +38,11 @@ class ModelRegistry {
     (r'(gpt-oss|gpt-5(?!-chat)|o\d|'
             r'gemini-(?:2\.5|3).*|gemini-(?:flash-latest|pro-latest)|'
             r'gemini-3-pro-image-preview|'
+            r'gemma[-_]?4|'
             r'claude|'
             r'qwen-?3|doubao.+1([-.])(?:6|8)|grok-4|kimi-k2|'
-            r'step-3|intern-s1|glm-4([-.])(?:5|6|7)|glm-5|minimax-m2|'
-            r'deepseek-(?:r1|v3\.1|v3\.2)|'
+            r'step-3|intern-s1|glm-4([-.])(?:5|6|7)|glm-5|minimax-(?:m2|m3)|'
+            r'deepseek-(?:r1|v3\.1|v3\.2|v4)|'
             r'deepseek-reasoner|'
             r'mimo-v2'
             r')')
@@ -52,6 +54,13 @@ class ModelRegistry {
     final id = rawId.toLowerCase();
     return id.contains('embedding') ||
         RegExp(r'(^|[-_/])embed(?:dings?)?([-.]|$)').hasMatch(id);
+  }
+
+  static bool _isGemini35Flash(String id) {
+    return RegExp(
+      r'(^|[/:_-])gemini-3\.5-flash([._:@/-]|$)',
+      caseSensitive: false,
+    ).hasMatch(id);
   }
 
   static ModelInfo infer(ModelInfo base) {
@@ -82,6 +91,17 @@ class ModelRegistry {
       ab.removeWhere(
         (x) => x == ModelAbility.tool || x == ModelAbility.reasoning,
       );
+      return base.copyWith(input: inMods, output: outMods, abilities: ab);
+    }
+    if (_isGemini35Flash(id)) {
+      if (!inMods.contains(Modality.image)) inMods.add(Modality.image);
+      outMods
+        ..clear()
+        ..add(Modality.text);
+      if (!ab.contains(ModelAbility.tool)) ab.add(ModelAbility.tool);
+      if (!ab.contains(ModelAbility.reasoning)) {
+        ab.add(ModelAbility.reasoning);
+      }
       return base.copyWith(input: inMods, output: outMods, abilities: ab);
     }
     if (vision.hasMatch(id)) {
@@ -276,6 +296,7 @@ class GoogleProvider extends BaseProvider {
       // we manually inject known supported Claude models for convenience.
       if (cfg.vertexAI == true) {
         final knownClaude = [
+          'claude-opus-4-7',
           'claude-opus-4-6',
           'claude-opus-4-5@20251101',
           'claude-opus-4-1@20250805',

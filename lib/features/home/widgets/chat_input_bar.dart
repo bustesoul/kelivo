@@ -20,12 +20,14 @@ import '../../../core/providers/settings_provider.dart';
 import '../../../core/providers/assistant_provider.dart';
 import '../../../core/services/search/search_service.dart';
 import '../../../core/services/api/builtin_tools.dart';
+import '../../../core/services/api/chat_api_service.dart';
 import '../../../core/utils/multimodal_input_utils.dart';
 import '../../../utils/brand_assets.dart';
 import '../../../shared/widgets/ios_tactile.dart';
 import '../../../utils/app_directories.dart';
 import 'package:super_clipboard/super_clipboard.dart';
 import '../../../desktop/desktop_context_menu.dart';
+import 'package:Kelivo/theme/app_font_weights.dart';
 
 class ChatInputBarController {
   _ChatInputBarState? _state;
@@ -34,11 +36,17 @@ class ChatInputBarController {
     if (identical(_state, s)) _state = null;
   }
 
+  bool get allowImagesApiRouting => _state?._allowImagesApiRouting ?? true;
+  bool get hasDraftMedia => _state?._hasDraftMedia ?? false;
+
   void addImages(List<String> paths) => _state?._addImages(paths);
   void clearImages() => _state?._clearImages();
   void addFiles(List<DocumentAttachment> docs) => _state?._addFiles(docs);
   void clearFiles() => _state?._clearFiles();
   void restoreInput(ChatInputData input) => _state?._restoreInput(input);
+  ChatInputData snapshotInput(String text) =>
+      _state?._snapshotInput(text) ?? ChatInputData(text: text.trim());
+  void clearDraft() => _state?._clearDraft();
 }
 
 class ChatInputBar extends StatefulWidget {
@@ -50,7 +58,6 @@ class ChatInputBar extends StatefulWidget {
     this.onLongPressSelectModel,
     this.onOpenMcp,
     this.onLongPressMcp,
-    this.onToggleSearch,
     this.onOpenSearch,
     this.onMore,
     this.onConfigureReasoning,
@@ -68,7 +75,6 @@ class ChatInputBar extends StatefulWidget {
     this.supportsReasoning = true,
     this.showMcpButton = false,
     this.mcpActive = false,
-    this.searchEnabled = false,
     this.showMiniMapButton = false,
     this.onOpenMiniMap,
     this.onPickCamera,
@@ -88,6 +94,13 @@ class ChatInputBar extends StatefulWidget {
     this.showOcrButton = false,
     this.ocrActive = false,
     this.onToggleOcr,
+    this.conversationId,
+    this.sendButtonTooltip,
+    this.backgroundImageActive = false,
+    this.inputBackgroundOpacityLight =
+        SettingsProvider.defaultChatInputBackgroundOpacityLight,
+    this.inputBackgroundOpacityDark =
+        SettingsProvider.defaultChatInputBackgroundOpacityDark,
   });
 
   final Future<ChatInputSubmissionResult> Function(ChatInputData)? onSend;
@@ -96,7 +109,6 @@ class ChatInputBar extends StatefulWidget {
   final VoidCallback? onLongPressSelectModel;
   final VoidCallback? onOpenMcp;
   final VoidCallback? onLongPressMcp;
-  final ValueChanged<bool>? onToggleSearch;
   final VoidCallback? onOpenSearch;
   final VoidCallback? onMore;
   final VoidCallback? onConfigureReasoning;
@@ -114,7 +126,6 @@ class ChatInputBar extends StatefulWidget {
   final bool supportsReasoning;
   final bool showMcpButton;
   final bool mcpActive;
-  final bool searchEnabled;
   final bool showMiniMapButton;
   final VoidCallback? onOpenMiniMap;
   final VoidCallback? onPickCamera;
@@ -134,6 +145,11 @@ class ChatInputBar extends StatefulWidget {
   final bool showOcrButton;
   final bool ocrActive;
   final VoidCallback? onToggleOcr;
+  final String? conversationId;
+  final String? sendButtonTooltip;
+  final bool backgroundImageActive;
+  final double inputBackgroundOpacityLight;
+  final double inputBackgroundOpacityDark;
 
   @override
   State<ChatInputBar> createState() => _ChatInputBarState();
@@ -156,11 +172,82 @@ class _ChatInputBarState extends State<ChatInputBar>
   final GlobalKey _contextMgmtAnchorKey = GlobalKey(
     debugLabel: 'context-mgmt-anchor',
   );
+  static const double _documentPreviewHeight = 48;
+  static const double _imagePreviewHeight = 64;
+  static const double _imageRemoveButtonSize = 18;
   // Suppress context menu briefly after app resume to avoid flickering
   bool _suppressContextMenu = false;
   bool _isSubmitting = false;
+  String? _imageModeModelKey;
+  String? _lastImageModeModelKey;
+  String? _dismissedImageModeModelKey;
 
   bool get _composerLocked => widget.hasQueuedInput;
+
+  Color _inputFillColor({
+    required ThemeData theme,
+    required bool backgroundImageActive,
+    required double lightOpacity,
+    required double darkOpacity,
+  }) {
+    final isDark = theme.brightness == Brightness.dark;
+    final configuredOpacity = (isDark ? darkOpacity : lightOpacity)
+        .clamp(0.0, 1.0)
+        .toDouble();
+    final backgroundRatio = isDark
+        ? 0.545 / SettingsProvider.defaultChatInputBackgroundOpacityDark
+        : 0.5296 / SettingsProvider.defaultChatInputBackgroundOpacityLight;
+    final targetOpacity = backgroundImageActive
+        ? configuredOpacity * backgroundRatio
+        : configuredOpacity;
+    final overlayAlpha = isDark ? (backgroundImageActive ? 0.09 : 0.07) : 0.02;
+    final overlayTint = isDark
+        ? Colors.white.withValues(alpha: overlayAlpha)
+        : theme.colorScheme.primary.withValues(alpha: overlayAlpha);
+    final baseAlpha = ((targetOpacity - overlayAlpha) / (1.0 - overlayAlpha))
+        .clamp(0.0, 1.0)
+        .toDouble();
+    final base = theme.colorScheme.surface.withValues(alpha: baseAlpha);
+    return Color.alphaBlend(overlayTint, base).withValues(alpha: targetOpacity);
+  }
+
+  bool _supportsImagesApiRouting(BuildContext context) {
+    final settings = context.watch<SettingsProvider>();
+    final ap = context.watch<AssistantProvider>();
+    final a = ap.currentAssistant;
+    final providerKey = a?.chatModelProvider ?? settings.currentModelProvider;
+    final modelId = a?.chatModelId ?? settings.currentModelId;
+    if (providerKey == null || modelId == null) {
+      _imageModeModelKey = null;
+      return false;
+    }
+    final cfg = settings.getProviderConfig(providerKey);
+    final supported = ChatApiService.supportsOpenAIImagesApiRouting(
+      cfg,
+      modelId,
+    );
+    final nextKey = supported
+        ? '${widget.conversationId ?? ''}::$providerKey::$modelId'
+        : null;
+    if (nextKey != _lastImageModeModelKey) {
+      _dismissedImageModeModelKey = null;
+      _lastImageModeModelKey = nextKey;
+    }
+    _imageModeModelKey = nextKey;
+    return supported;
+  }
+
+  bool get _imageModeActive {
+    final key = _imageModeModelKey;
+    return key != null && key != _dismissedImageModeModelKey;
+  }
+
+  bool get _allowImagesApiRouting {
+    final key = _imageModeModelKey;
+    return key == null || key != _dismissedImageModeModelKey;
+  }
+
+  bool get _hasDraftMedia => _images.isNotEmpty || _docs.isNotEmpty;
 
   // Instance method for onChanged to avoid recreating the callback on every build
   void _onTextChanged(String _) => setState(() {});
@@ -194,16 +281,29 @@ class _ChatInputBarState extends State<ChatInputBar>
     });
   }
 
-  void _removeImageAt(int index) async {
-    final path = _images[index];
+  ChatInputData _snapshotInput(String text) {
+    return ChatInputData(
+      text: text.trim(),
+      imagePaths: List<String>.of(_images),
+      documents: List<DocumentAttachment>.of(_docs),
+      allowImagesApiRouting: _allowImagesApiRouting,
+    );
+  }
+
+  void _clearDraft() {
+    setState(() {
+      _controller.clear();
+      _images.clear();
+      _docs.clear();
+    });
+  }
+
+  void _removeImageAt(int index) {
     setState(() => _images.removeAt(index));
-    // best-effort delete
-    try {
-      final f = File(path);
-      if (await f.exists()) {
-        await f.delete();
-      }
-    } catch (_) {}
+  }
+
+  void _removeDocumentAt(int index) {
+    setState(() => _docs.removeAt(index));
   }
 
   @override
@@ -284,6 +384,7 @@ class _ChatInputBarState extends State<ChatInputBar>
               text: text,
               imagePaths: List.of(_images),
               documents: List.of(_docs),
+              allowImagesApiRouting: _allowImagesApiRouting,
             ),
           ) ??
           ChatInputSubmissionResult.rejected;
@@ -874,7 +975,7 @@ class _ChatInputBarState extends State<ChatInputBar>
           modelId: currentModelId,
         );
         final builtinSearchActive = toolsState.searchActive;
-        final appSearchEnabled = settings.searchEnabled;
+        final appSearchEnabled = ap.currentSearchEnabled;
         final brandAsset = (() {
           if (!appSearchEnabled || builtinSearchActive) return null;
           final services = settings.searchServices;
@@ -1404,25 +1505,192 @@ class _ChatInputBarState extends State<ChatInputBar>
     setState(() {});
   }
 
+  Widget _buildInlineAttachmentPreviews(BuildContext context, bool isDark) {
+    final theme = Theme.of(context);
+    final previewFill = isDark
+        ? Colors.white.withValues(alpha: 0.08)
+        : theme.colorScheme.onSurface.withValues(alpha: 0.045);
+    final previewBorder = isDark
+        ? Colors.white.withValues(alpha: 0.10)
+        : theme.colorScheme.outline.withValues(alpha: 0.13);
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        AppSpacing.sm,
+        AppSpacing.sm,
+        AppSpacing.sm,
+        AppSpacing.xxs,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (_images.isNotEmpty)
+            SizedBox(
+              key: const ValueKey('chat-input-image-previews'),
+              height: _imagePreviewHeight,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                itemCount: _images.length,
+                separatorBuilder: (_, __) => const SizedBox(width: 8),
+                itemBuilder: (context, idx) {
+                  final path = _images[idx];
+                  return Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      DecoratedBox(
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: previewBorder, width: 1),
+                        ),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(9),
+                          child: Image.file(
+                            File(path),
+                            width: 64,
+                            height: 64,
+                            fit: BoxFit.cover,
+                            errorBuilder: (_, __, ___) => Container(
+                              width: 64,
+                              height: 64,
+                              color: previewFill,
+                              child: Icon(
+                                Icons.broken_image,
+                                color: theme.colorScheme.onSurface.withValues(
+                                  alpha: 0.45,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      Positioned(
+                        right: 4,
+                        top: 4,
+                        child: IosCardPress(
+                          key: ValueKey('chat-input-image-remove:$idx'),
+                          haptics: false,
+                          baseColor: isDark
+                              ? Colors.black.withValues(alpha: 0.50)
+                              : Colors.black.withValues(alpha: 0.46),
+                          pressedScale: 0.94,
+                          borderRadius: BorderRadius.circular(
+                            _imageRemoveButtonSize / 2,
+                          ),
+                          padding: EdgeInsets.zero,
+                          duration: const Duration(milliseconds: 140),
+                          onTap: () => _removeImageAt(idx),
+                          child: const SizedBox(
+                            width: _imageRemoveButtonSize,
+                            height: _imageRemoveButtonSize,
+                            child: Icon(
+                              Icons.close,
+                              size: 11,
+                              color: Colors.white,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  );
+                },
+              ),
+            ),
+          if (_images.isNotEmpty && _docs.isNotEmpty)
+            const SizedBox(height: AppSpacing.xs),
+          if (_docs.isNotEmpty)
+            SizedBox(
+              key: const ValueKey('chat-input-document-previews'),
+              height: _documentPreviewHeight,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                itemCount: _docs.length,
+                separatorBuilder: (_, __) => const SizedBox(width: 8),
+                itemBuilder: (context, idx) {
+                  final d = _docs[idx];
+                  return Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 8,
+                    ),
+                    decoration: BoxDecoration(
+                      color: previewFill,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: previewBorder, width: 1),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.insert_drive_file,
+                          size: 18,
+                          color: theme.colorScheme.onSurface.withValues(
+                            alpha: 0.72,
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 180),
+                          child: Text(
+                            d.fileName,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: theme.colorScheme.onSurface,
+                              fontSize: 13,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 3),
+                        IosIconButton(
+                          key: ValueKey('chat-input-document-remove:$idx'),
+                          icon: Icons.close,
+                          size: 16,
+                          padding: const EdgeInsets.all(3),
+                          color: theme.colorScheme.onSurface.withValues(
+                            alpha: 0.58,
+                          ),
+                          onTap: () => _removeDocumentAt(idx),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
+    final inputFillColor = _inputFillColor(
+      theme: theme,
+      backgroundImageActive: widget.backgroundImageActive,
+      lightOpacity: widget.inputBackgroundOpacityLight,
+      darkOpacity: widget.inputBackgroundOpacityDark,
+    );
     final hasText = _controller.text.trim().isNotEmpty;
     final hasImages = _images.isNotEmpty;
     final hasDocs = _docs.isNotEmpty;
+    _supportsImagesApiRouting(context);
     final size = MediaQuery.sizeOf(context);
     final viewInsets = MediaQuery.viewInsetsOf(context);
     final bool isMobileLayout = size.width < AppBreakpoints.tablet;
     final double visibleHeight = size.height - viewInsets.bottom;
-    final double attachmentsHeight =
-        (hasDocs ? 48 + AppSpacing.xs : 0) +
-        (hasImages ? 64 + AppSpacing.xs : 0);
+    final double attachmentPreviewHeight = (hasDocs || hasImages)
+        ? AppSpacing.sm +
+              (hasImages ? _imagePreviewHeight : 0) +
+              (hasImages && hasDocs ? AppSpacing.xs : 0) +
+              (hasDocs ? _documentPreviewHeight : 0) +
+              AppSpacing.xxs
+        : 0;
     const double baseChromeHeight = 120; // padding + action row + chrome buffer
     double maxInputHeight = double.infinity;
     if (isMobileLayout) {
       final double available =
-          visibleHeight - attachmentsHeight - baseChromeHeight;
+          visibleHeight - attachmentPreviewHeight - baseChromeHeight;
       final double softCap = visibleHeight * 0.45;
       if (available > 0) {
         maxInputHeight = math.min(softCap, available);
@@ -1447,7 +1715,7 @@ class _ChatInputBarState extends State<ChatInputBar>
           AppSpacing.sm,
           AppSpacing.xxs,
           AppSpacing.sm,
-          AppSpacing.sm,
+          AppSpacing.xs,
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -1463,378 +1731,307 @@ class _ChatInputBarState extends State<ChatInputBar>
               ),
               const SizedBox(height: AppSpacing.xs),
             ],
-            // File attachments (if any)
-            if (hasDocs) ...[
-              SizedBox(
-                height: 48,
-                child: ListView.separated(
-                  scrollDirection: Axis.horizontal,
-                  itemCount: _docs.length,
-                  separatorBuilder: (_, __) => const SizedBox(width: 8),
-                  itemBuilder: (context, idx) {
-                    final d = _docs[idx];
-                    return Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 8,
-                      ),
+            Stack(
+              clipBehavior: Clip.none,
+              children: [
+                // Main input container with iOS-like frosted glass effect
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(20),
+                  child: BackdropFilter(
+                    filter: ui.ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+                    child: Container(
                       decoration: BoxDecoration(
-                        color: isDark
-                            ? Colors.white12
-                            : theme.colorScheme.surface,
-                        borderRadius: BorderRadius.circular(10),
-                        boxShadow: isDark ? [] : AppShadows.soft,
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Icon(Icons.insert_drive_file, size: 18),
-                          const SizedBox(width: 6),
-                          ConstrainedBox(
-                            constraints: const BoxConstraints(maxWidth: 180),
-                            child: Text(
-                              d.fileName,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                          const SizedBox(width: 6),
-                          GestureDetector(
-                            onTap: () {
-                              setState(() => _docs.removeAt(idx));
-                              // best-effort delete persisted attachment
-                              try {
-                                final f = File(d.path);
-                                if (f.existsSync()) {
-                                  f.deleteSync();
-                                }
-                              } catch (_) {}
-                            },
-                            child: const Icon(Icons.close, size: 16),
-                          ),
-                        ],
-                      ),
-                    );
-                  },
-                ),
-              ),
-              const SizedBox(height: AppSpacing.xs),
-            ],
-            // Image previews (if any)
-            if (hasImages) ...[
-              SizedBox(
-                height: 64,
-                child: ListView.separated(
-                  padding: const EdgeInsets.only(bottom: 6),
-                  scrollDirection: Axis.horizontal,
-                  itemCount: _images.length,
-                  separatorBuilder: (_, __) => const SizedBox(width: 8),
-                  itemBuilder: (context, idx) {
-                    final path = _images[idx];
-                    return Stack(
-                      clipBehavior: Clip.none,
-                      children: [
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(10),
-                          child: Image.file(
-                            File(path),
-                            width: 64,
-                            height: 64,
-                            fit: BoxFit.cover,
-                            errorBuilder: (_, __, ___) => Container(
-                              width: 64,
-                              height: 64,
-                              color: Colors.black12,
-                              child: const Icon(Icons.broken_image),
-                            ),
-                          ),
+                        // Translucent background over blurred content
+                        color: inputFillColor,
+                        borderRadius: BorderRadius.circular(20),
+                        // Use previous gray border for better contrast on white
+                        border: Border.all(
+                          color: isDark
+                              ? Colors.white.withValues(alpha: 0.10)
+                              : theme.colorScheme.outline.withValues(
+                                  alpha: 0.20,
+                                ),
+                          width: 1,
                         ),
-                        Positioned(
-                          right: -6,
-                          top: -6,
-                          child: GestureDetector(
-                            onTap: () => _removeImageAt(idx),
-                            child: Container(
-                              width: 22,
-                              height: 22,
-                              decoration: BoxDecoration(
-                                color: Colors.black.withValues(alpha: 0.6),
-                                shape: BoxShape.circle,
-                              ),
-                              child: const Icon(
-                                Icons.close,
-                                size: 14,
-                                color: Colors.white,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    );
-                  },
-                ),
-              ),
-              const SizedBox(height: AppSpacing.xs),
-            ],
-            // Main input container with iOS-like frosted glass effect
-            ClipRRect(
-              borderRadius: BorderRadius.circular(20),
-              child: BackdropFilter(
-                filter: ui.ImageFilter.blur(sigmaX: 14, sigmaY: 14),
-                child: Container(
-                  decoration: BoxDecoration(
-                    // Translucent background over blurred content
-                    color: isDark
-                        ? Colors.white.withValues(alpha: 0.06)
-                        : Colors.white.withValues(alpha: 0.07),
-                    borderRadius: BorderRadius.circular(20),
-                    // Use previous gray border for better contrast on white
-                    border: Border.all(
-                      color: isDark
-                          ? Colors.white.withValues(alpha: 0.10)
-                          : theme.colorScheme.outline.withValues(alpha: 0.20),
-                      width: 1,
-                    ),
-                  ),
-                  child: Column(
-                    children: [
-                      // Input field with expand/collapse button
-                      Stack(
+                      ),
+                      child: Column(
                         children: [
-                          Padding(
-                            padding: const EdgeInsets.fromLTRB(
-                              AppSpacing.md,
-                              AppSpacing.xxs,
-                              AppSpacing.md,
-                              AppSpacing.xs,
-                            ),
-                            child: ConstrainedBox(
-                              constraints: textFieldConstraints,
-                              child: Focus(
-                                onKeyEvent: _handleKeyEvent,
-                                child: Builder(
-                                  builder: (ctx) {
-                                    // Desktop: show a right-click context menu with paste/cut/copy/select all
-                                    // Future<void> _showDesktopContextMenu(Offset globalPos) async {
-                                    //   bool isDesktop = false;
-                                    //   try { isDesktop = Platform.isMacOS || Platform.isWindows || Platform.isLinux; } catch (_) {}
-                                    //   if (!isDesktop) return;
-                                    //   // Ensure input has focus so operations apply correctly
-                                    //   try { widget.focusNode?.requestFocus(); } catch (_) {}
-                                    //
-                                    //   final sel = _controller.selection;
-                                    //   final hasSelection = sel.isValid && !sel.isCollapsed;
-                                    //   final hasText = _controller.text.isNotEmpty;
-                                    //
-                                    //   final l10n = MaterialLocalizations.of(ctx);
-                                    //   await showDesktopContextMenuAt(
-                                    //     ctx,
-                                    //     globalPosition: globalPos,
-                                    //     items: [
-                                    //       DesktopContextMenuItem(
-                                    //         icon: Lucide.Clipboard,
-                                    //         label: l10n.pasteButtonLabel,
-                                    //         onTap: () async {
-                                    //           await _handlePasteFromClipboard();
-                                    //         },
-                                    //       ),
-                                    //       DesktopContextMenuItem(
-                                    //         icon: Lucide.Cut,
-                                    //         label: l10n.cutButtonLabel,
-                                    //         onTap: () async {
-                                    //           final s = _controller.selection;
-                                    //           if (s.isValid && !s.isCollapsed) {
-                                    //             final text = _controller.text.substring(s.start, s.end);
-                                    //             try { await Clipboard.setData(ClipboardData(text: text)); } catch (_) {}
-                                    //             final newText = _controller.text.replaceRange(s.start, s.end, '');
-                                    //             _controller.value = TextEditingValue(
-                                    //               text: newText,
-                                    //               selection: TextSelection.collapsed(offset: s.start),
-                                    //             );
-                                    //             setState(() {});
-                                    //           }
-                                    //         },
-                                    //       ),
-                                    //       DesktopContextMenuItem(
-                                    //         icon: Lucide.Copy,
-                                    //         label: l10n.copyButtonLabel,
-                                    //         onTap: () async {
-                                    //           final s2 = _controller.selection;
-                                    //           if (s2.isValid && !s2.isCollapsed) {
-                                    //             final text = _controller.text.substring(s2.start, s2.end);
-                                    //             try { await Clipboard.setData(ClipboardData(text: text)); } catch (_) {}
-                                    //           }
-                                    //         },
-                                    //       ),
-                                    //       // DesktopContextMenuItem(
-                                    //       //   // icon: Lucide.TextSelect,
-                                    //       //   label: l10n.selectAllButtonLabel,
-                                    //       //   onTap: () {
-                                    //       //     if (hasText) {
-                                    //       //       _controller.selection = TextSelection(baseOffset: 0, extentOffset: _controller.text.length);
-                                    //       //       setState(() {});
-                                    //       //     }
-                                    //       //   },
-                                    //       // ),
-                                    //     ],
-                                    //   );
-                                    // }
+                          if (hasDocs || hasImages)
+                            _buildInlineAttachmentPreviews(context, isDark),
+                          // Input field with expand/collapse button
+                          Stack(
+                            children: [
+                              Padding(
+                                padding: const EdgeInsets.fromLTRB(
+                                  AppSpacing.md,
+                                  AppSpacing.xxs,
+                                  AppSpacing.md,
+                                  AppSpacing.xs,
+                                ),
+                                child: ConstrainedBox(
+                                  constraints: textFieldConstraints,
+                                  child: Focus(
+                                    onKeyEvent: _handleKeyEvent,
+                                    child: Builder(
+                                      builder: (ctx) {
+                                        // Desktop: show a right-click context menu with paste/cut/copy/select all
+                                        // Future<void> _showDesktopContextMenu(Offset globalPos) async {
+                                        //   bool isDesktop = false;
+                                        //   try { isDesktop = Platform.isMacOS || Platform.isWindows || Platform.isLinux; } catch (_) {}
+                                        //   if (!isDesktop) return;
+                                        //   // Ensure input has focus so operations apply correctly
+                                        //   try { widget.focusNode?.requestFocus(); } catch (_) {}
+                                        //
+                                        //   final sel = _controller.selection;
+                                        //   final hasSelection = sel.isValid && !sel.isCollapsed;
+                                        //   final hasText = _controller.text.isNotEmpty;
+                                        //
+                                        //   final l10n = MaterialLocalizations.of(ctx);
+                                        //   await showDesktopContextMenuAt(
+                                        //     ctx,
+                                        //     globalPosition: globalPos,
+                                        //     items: [
+                                        //       DesktopContextMenuItem(
+                                        //         icon: Lucide.Clipboard,
+                                        //         label: l10n.pasteButtonLabel,
+                                        //         onTap: () async {
+                                        //           await _handlePasteFromClipboard();
+                                        //         },
+                                        //       ),
+                                        //       DesktopContextMenuItem(
+                                        //         icon: Lucide.Cut,
+                                        //         label: l10n.cutButtonLabel,
+                                        //         onTap: () async {
+                                        //           final s = _controller.selection;
+                                        //           if (s.isValid && !s.isCollapsed) {
+                                        //             final text = _controller.text.substring(s.start, s.end);
+                                        //             try { await Clipboard.setData(ClipboardData(text: text)); } catch (_) {}
+                                        //             final newText = _controller.text.replaceRange(s.start, s.end, '');
+                                        //             _controller.value = TextEditingValue(
+                                        //               text: newText,
+                                        //               selection: TextSelection.collapsed(offset: s.start),
+                                        //             );
+                                        //             setState(() {});
+                                        //           }
+                                        //         },
+                                        //       ),
+                                        //       DesktopContextMenuItem(
+                                        //         icon: Lucide.Copy,
+                                        //         label: l10n.copyButtonLabel,
+                                        //         onTap: () async {
+                                        //           final s2 = _controller.selection;
+                                        //           if (s2.isValid && !s2.isCollapsed) {
+                                        //             final text = _controller.text.substring(s2.start, s2.end);
+                                        //             try { await Clipboard.setData(ClipboardData(text: text)); } catch (_) {}
+                                        //           }
+                                        //         },
+                                        //       ),
+                                        //       // DesktopContextMenuItem(
+                                        //       //   // icon: Lucide.TextSelect,
+                                        //       //   label: l10n.selectAllButtonLabel,
+                                        //       //   onTap: () {
+                                        //       //     if (hasText) {
+                                        //       //       _controller.selection = TextSelection(baseOffset: 0, extentOffset: _controller.text.length);
+                                        //       //       setState(() {});
+                                        //       //     }
+                                        //       //   },
+                                        //       // ),
+                                        //     ],
+                                        //   );
+                                        // }
 
-                                    final enterToSend = context
-                                        .watch<SettingsProvider>()
-                                        .enterToSendOnMobile;
-                                    return GestureDetector(
-                                      behavior: HitTestBehavior.deferToChild,
-                                      // onSecondaryTapDown: (details) {
-                                      //   // _showDesktopContextMenu(details.globalPosition);
-                                      // },
-                                      child: TextField(
-                                        controller: _controller,
-                                        focusNode: widget.focusNode,
-                                        onChanged: _onTextChanged,
-                                        readOnly: _composerLocked,
-                                        minLines: 1,
-                                        maxLines: _isExpanded ? 25 : 5,
-                                        // On mobile, optionally show "Send" on the return key and submit on tap.
-                                        // Still keep multiline so pasted text preserves line breaks.
-                                        keyboardType: TextInputType.multiline,
-                                        textInputAction: enterToSend
-                                            ? TextInputAction.send
-                                            : TextInputAction.newline,
-                                        onSubmitted: enterToSend
-                                            ? (_) => unawaited(_handleSend())
-                                            : null,
-                                        // Custom context menu: use instance method to avoid flickering
-                                        // caused by recreating the callback on every build.
-                                        // See: https://github.com/flutter/flutter/issues/150551
-                                        contextMenuBuilder: _buildContextMenu,
-                                        autofocus: false,
-                                        decoration: InputDecoration(
-                                          hintText: _hint(context),
-                                          hintStyle: TextStyle(
-                                            color: theme.colorScheme.onSurface
-                                                .withValues(alpha: 0.45),
-                                          ),
-                                          border: InputBorder.none,
-                                          contentPadding:
-                                              const EdgeInsets.symmetric(
-                                                vertical: 2,
+                                        final enterToSend = context
+                                            .watch<SettingsProvider>()
+                                            .enterToSendOnMobile;
+                                        return GestureDetector(
+                                          behavior:
+                                              HitTestBehavior.deferToChild,
+                                          // onSecondaryTapDown: (details) {
+                                          //   // _showDesktopContextMenu(details.globalPosition);
+                                          // },
+                                          child: TextField(
+                                            controller: _controller,
+                                            focusNode: widget.focusNode,
+                                            onChanged: _onTextChanged,
+                                            readOnly: _composerLocked,
+                                            minLines: 1,
+                                            maxLines: _isExpanded ? 25 : 5,
+                                            // On mobile, optionally show "Send" on the return key and submit on tap.
+                                            // Still keep multiline so pasted text preserves line breaks.
+                                            keyboardType:
+                                                TextInputType.multiline,
+                                            textInputAction: enterToSend
+                                                ? TextInputAction.send
+                                                : TextInputAction.newline,
+                                            onSubmitted: enterToSend
+                                                ? (_) =>
+                                                      unawaited(_handleSend())
+                                                : null,
+                                            // Custom context menu: use instance method to avoid flickering
+                                            // caused by recreating the callback on every build.
+                                            // See: https://github.com/flutter/flutter/issues/150551
+                                            contextMenuBuilder:
+                                                _buildContextMenu,
+                                            autofocus: false,
+                                            decoration: InputDecoration(
+                                              hintText: _hint(context),
+                                              hintStyle: TextStyle(
+                                                color: theme
+                                                    .colorScheme
+                                                    .onSurface
+                                                    .withValues(alpha: 0.45),
                                               ),
-                                        ),
-                                        style: TextStyle(
-                                          color: theme.colorScheme.onSurface,
-                                          fontSize:
-                                              (Platform.isWindows ||
-                                                  Platform.isLinux ||
-                                                  Platform.isMacOS)
-                                              ? 14
-                                              : 15,
-                                        ),
-                                        cursorColor: theme.colorScheme.primary,
-                                      ),
-                                    );
-                                  },
-                                ),
-                              ),
-                            ),
-                          ),
-                          // Expand/Collapse icon button (only shown when 3+ lines)
-                          if (_showExpandButton)
-                            Positioned(
-                              top: 10,
-                              right: 12,
-                              child: GestureDetector(
-                                onTap: () {
-                                  setState(() => _isExpanded = !_isExpanded);
-                                  _ensureCaretVisible();
-                                },
-                                child: Icon(
-                                  _isExpanded
-                                      ? Lucide.ChevronsDownUp
-                                      : Lucide.ChevronsUpDown,
-                                  size: 16,
-                                  color: theme.colorScheme.onSurface.withValues(
-                                    alpha: 0.45,
-                                  ),
-                                ),
-                              ),
-                            ),
-                        ],
-                      ),
-                      // Bottom buttons row (no divider)
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(
-                          AppSpacing.xs,
-                          0,
-                          AppSpacing.xs,
-                          AppSpacing.xs,
-                        ),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            // Responsive left action bar that overflows into a + menu on desktop
-                            Expanded(
-                              child: _buildResponsiveLeftActions(context),
-                            ),
-                            Row(
-                              children: [
-                                if (widget.showMoreButton) ...[
-                                  _CompactIconButton(
-                                    tooltip: AppLocalizations.of(
-                                      context,
-                                    )!.chatInputBarMoreTooltip,
-                                    icon: Lucide.Plus,
-                                    active: widget.moreOpen,
-                                    onTap: _composerLocked
-                                        ? null
-                                        : widget.onMore,
-                                    childBuilder: (c) => AnimatedSwitcher(
-                                      duration: const Duration(
-                                        milliseconds: 200,
-                                      ),
-                                      transitionBuilder: (child, anim) =>
-                                          RotationTransition(
-                                            turns: Tween<double>(
-                                              begin: 0.85,
-                                              end: 1,
-                                            ).animate(anim),
-                                            child: FadeTransition(
-                                              opacity: anim,
-                                              child: child,
+                                              border: InputBorder.none,
+                                              contentPadding:
+                                                  const EdgeInsets.symmetric(
+                                                    vertical: 2,
+                                                  ),
                                             ),
+                                            style: TextStyle(
+                                              color:
+                                                  theme.colorScheme.onSurface,
+                                              fontSize:
+                                                  (Platform.isWindows ||
+                                                      Platform.isLinux ||
+                                                      Platform.isMacOS)
+                                                  ? 14
+                                                  : 15,
+                                            ),
+                                            cursorColor:
+                                                theme.colorScheme.primary,
                                           ),
-                                      child: Icon(
-                                        widget.moreOpen
-                                            ? Lucide.X
-                                            : Lucide.Plus,
-                                        key: ValueKey(
-                                          widget.moreOpen ? 'close' : 'add',
-                                        ),
-                                        size: 20,
-                                        color: c,
-                                      ),
+                                        );
+                                      },
                                     ),
                                   ),
-                                  const SizedBox(width: 8),
-                                ],
-                                _CompactSendButton(
-                                  enabled:
-                                      (hasText || hasImages || hasDocs) &&
-                                      !widget.loading,
-                                  loading: widget.loading,
-                                  onSend: _handleSend,
-                                  onStop: widget.loading ? widget.onStop : null,
-                                  color: theme.colorScheme.primary,
-                                  icon: Lucide.ArrowUp,
+                                ),
+                              ),
+                              // Expand/Collapse icon button (only shown when 3+ lines)
+                              if (_showExpandButton)
+                                Positioned(
+                                  top: 10,
+                                  right: 12,
+                                  child: GestureDetector(
+                                    onTap: () {
+                                      setState(
+                                        () => _isExpanded = !_isExpanded,
+                                      );
+                                      _ensureCaretVisible();
+                                    },
+                                    child: Icon(
+                                      _isExpanded
+                                          ? Lucide.ChevronsDownUp
+                                          : Lucide.ChevronsUpDown,
+                                      size: 16,
+                                      color: theme.colorScheme.onSurface
+                                          .withValues(alpha: 0.45),
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
+                          // Bottom buttons row (no divider)
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(
+                              AppSpacing.xs,
+                              0,
+                              AppSpacing.xs,
+                              AppSpacing.xs,
+                            ),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                // Responsive left action bar that overflows into a + menu on desktop
+                                Expanded(
+                                  child: _buildResponsiveLeftActions(context),
+                                ),
+                                Row(
+                                  children: [
+                                    if (widget.showMoreButton) ...[
+                                      _CompactIconButton(
+                                        tooltip: AppLocalizations.of(
+                                          context,
+                                        )!.chatInputBarMoreTooltip,
+                                        icon: Lucide.Plus,
+                                        active: widget.moreOpen,
+                                        onTap: _composerLocked
+                                            ? null
+                                            : widget.onMore,
+                                        childBuilder: (c) => AnimatedSwitcher(
+                                          duration: const Duration(
+                                            milliseconds: 200,
+                                          ),
+                                          transitionBuilder: (child, anim) =>
+                                              RotationTransition(
+                                                turns: Tween<double>(
+                                                  begin: 0.85,
+                                                  end: 1,
+                                                ).animate(anim),
+                                                child: FadeTransition(
+                                                  opacity: anim,
+                                                  child: child,
+                                                ),
+                                              ),
+                                          child: Icon(
+                                            widget.moreOpen
+                                                ? Lucide.X
+                                                : Lucide.Plus,
+                                            key: ValueKey(
+                                              widget.moreOpen ? 'close' : 'add',
+                                            ),
+                                            size: 20,
+                                            color: c,
+                                          ),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 8),
+                                    ],
+                                    _CompactSendButton(
+                                      enabled:
+                                          (hasText || hasImages || hasDocs) &&
+                                          !widget.loading,
+                                      loading: widget.loading,
+                                      onSend: _handleSend,
+                                      onStop: widget.loading
+                                          ? widget.onStop
+                                          : null,
+                                      color: theme.colorScheme.primary,
+                                      icon: Lucide.ArrowUp,
+                                      tooltip: widget.sendButtonTooltip,
+                                    ),
+                                  ],
                                 ),
                               ],
                             ),
-                          ],
-                        ),
+                          ),
+                        ],
                       ),
-                    ],
+                    ),
                   ),
                 ),
-              ),
+                if (_imageModeActive)
+                  PositionedDirectional(
+                    top: -12,
+                    start: AppSpacing.sm,
+                    child: _ImageModePill(
+                      label: AppLocalizations.of(
+                        context,
+                      )!.chatInputBarImageMode,
+                      closeTooltip: AppLocalizations.of(
+                        context,
+                      )!.chatInputBarDisableImageModeTooltip,
+                      onClose: _composerLocked
+                          ? null
+                          : () {
+                              final key = _imageModeModelKey;
+                              if (key == null) return;
+                              setState(() {
+                                _dismissedImageModeModelKey = key;
+                              });
+                            },
+                    ),
+                  ),
+              ],
             ),
           ],
         ),
@@ -1897,7 +2094,7 @@ class _QueuedInputBanner extends StatelessWidget {
                 Text(
                   label,
                   style: theme.textTheme.bodyMedium?.copyWith(
-                    fontWeight: FontWeight.w600,
+                    fontWeight: AppFontWeights.semibold,
                   ),
                 ),
                 if (hasPreview) ...[
@@ -1930,11 +2127,101 @@ class _QueuedInputBanner extends StatelessWidget {
               cancelLabel,
               style: theme.textTheme.bodySmall?.copyWith(
                 color: theme.colorScheme.primary,
-                fontWeight: FontWeight.w600,
+                fontWeight: AppFontWeights.semibold,
               ),
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _ImageModePill extends StatelessWidget {
+  const _ImageModePill({
+    required this.label,
+    required this.closeTooltip,
+    required this.onClose,
+  });
+
+  final String label;
+  final String closeTooltip;
+  final VoidCallback? onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final isDark = theme.brightness == Brightness.dark;
+    final bg = (isDark ? Colors.black : Colors.white).withValues(
+      alpha: isDark ? 0.34 : 0.58,
+    );
+    final border = isDark
+        ? Colors.white.withValues(alpha: 0.14)
+        : scheme.primary.withValues(alpha: 0.36);
+    final fg = isDark ? scheme.onSurface : scheme.primary;
+    final iconColor = isDark ? scheme.primaryContainer : scheme.primary;
+    final radius = BorderRadius.circular(999);
+
+    return RepaintBoundary(
+      child: ClipRRect(
+        borderRadius: radius,
+        child: BackdropFilter(
+          filter: ui.ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: bg,
+              borderRadius: radius,
+              border: Border.all(color: border),
+            ),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 172),
+              child: SizedBox(
+                height: 24,
+                child: Padding(
+                  padding: const EdgeInsetsDirectional.only(start: 9, end: 3),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Lucide.Brush, size: 14, color: iconColor),
+                      const SizedBox(width: 5),
+                      Flexible(
+                        child: Text(
+                          label,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.labelSmall?.copyWith(
+                            color: fg,
+                            fontWeight: AppFontWeights.semibold,
+                            letterSpacing: 0,
+                          ),
+                        ),
+                      ),
+                      Tooltip(
+                        message: closeTooltip,
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: onClose,
+                          child: Padding(
+                            padding: const EdgeInsets.all(5),
+                            child: Icon(
+                              Lucide.X,
+                              size: 13,
+                              color: (isDark ? scheme.onSurfaceVariant : fg)
+                                  .withValues(
+                                    alpha: onClose == null ? 0.38 : 0.78,
+                                  ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -2039,6 +2326,7 @@ class _CompactSendButton extends StatelessWidget {
     required this.icon,
     this.loading = false,
     this.onStop,
+    this.tooltip,
   });
 
   final bool enabled;
@@ -2047,6 +2335,7 @@ class _CompactSendButton extends StatelessWidget {
   final VoidCallback? onStop;
   final Color color;
   final IconData icon;
+  final String? tooltip;
 
   @override
   Widget build(BuildContext context) {
@@ -2060,7 +2349,7 @@ class _CompactSendButton extends StatelessWidget {
         ? (isDark ? Colors.black : Colors.white)
         : (isDark ? Colors.white70 : Colors.grey.shade600);
 
-    return Material(
+    final button = Material(
       color: bg,
       shape: const CircleBorder(),
       child: InkWell(
@@ -2086,6 +2375,12 @@ class _CompactSendButton extends StatelessWidget {
           ),
         ),
       ),
+    );
+    if (tooltip == null) return button;
+    return Tooltip(
+      message: tooltip!,
+      waitDuration: const Duration(milliseconds: 350),
+      child: Semantics(tooltip: tooltip!, child: button),
     );
   }
 }

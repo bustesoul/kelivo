@@ -11,6 +11,7 @@ import '../core/services/api/builtin_tools.dart';
 import '../core/services/search/search_service.dart';
 import '../utils/brand_assets.dart';
 import '../l10n/app_localizations.dart';
+import '../theme/app_font_weights.dart';
 
 /// Show a desktop-only floating popover for search provider selection.
 /// It appears above the chat input bar with blurred background, top rounded corners,
@@ -235,10 +236,41 @@ class _SearchContent extends StatelessWidget {
     );
   }
 
+  bool _supportsClaudeDynamicWebSearch(
+    SettingsProvider settings,
+    AssistantProvider ap,
+  ) {
+    final a = ap.currentAssistant;
+    final providerKey = a?.chatModelProvider ?? settings.currentModelProvider;
+    final modelId = a?.chatModelId ?? settings.currentModelId;
+    if (providerKey == null || (modelId ?? '').isEmpty) return false;
+    final cfg = settings.getProviderConfig(providerKey);
+    return BuiltInToolsHelper.supportsClaudeDynamicWebSearchForModel(
+      cfg: cfg,
+      modelId: modelId,
+    );
+  }
+
+  bool _hasClaudeDynamicWebSearchEnabled(
+    SettingsProvider settings,
+    AssistantProvider ap,
+  ) {
+    final a = ap.currentAssistant;
+    final providerKey = a?.chatModelProvider ?? settings.currentModelProvider;
+    final modelId = a?.chatModelId ?? settings.currentModelId;
+    if (providerKey == null || (modelId ?? '').isEmpty) return false;
+    final cfg = settings.getProviderConfig(providerKey);
+    return BuiltInToolsHelper.isClaudeDynamicWebSearchEnabled(
+      cfg: cfg,
+      modelId: modelId,
+    );
+  }
+
   Future<void> _enableBuiltInSearch(
     SettingsProvider sp,
-    AssistantProvider ap,
-  ) async {
+    AssistantProvider ap, {
+    bool useClaudeDynamicWebSearch = false,
+  }) async {
     final a = ap.currentAssistant;
     final providerKey = a?.chatModelProvider ?? sp.currentModelProvider;
     final modelId = a?.chatModelId ?? sp.currentModelId;
@@ -255,12 +287,29 @@ class _SearchContent extends StatelessWidget {
     final tools = BuiltInToolNames.parseAndNormalize(mo['builtInTools'])
       ..add(BuiltInToolNames.search);
     mo['builtInTools'] = BuiltInToolNames.orderedForStorage(tools);
+    final rawWs = mo['webSearch'];
+    final ws = Map<String, dynamic>.from(
+      rawWs is Map
+          ? rawWs.map((k, v) => MapEntry(k.toString(), v))
+          : const <String, dynamic>{},
+    );
+    if (useClaudeDynamicWebSearch) {
+      ws['toolVersion'] = 'web_search_20260209';
+    } else {
+      ws.remove('toolVersion');
+      ws.remove('tool_version');
+    }
+    if (ws.isEmpty) {
+      mo.remove('webSearch');
+    } else {
+      mo['webSearch'] = ws;
+    }
     overrides[modelId] = mo;
     await sp.setProviderConfig(
       providerKey,
       cfg.copyWith(modelOverrides: overrides),
     );
-    await sp.setSearchEnabled(false);
+    await ap.setSearchEnabledForCurrentAssistant(false);
   }
 
   Future<void> _disableBuiltInSearch(
@@ -305,11 +354,19 @@ class _SearchContent extends StatelessWidget {
       0,
       services.isNotEmpty ? services.length - 1 : 0,
     );
-    final enabled = sp.searchEnabled;
+    final enabled = ap.currentSearchEnabled;
     final settingsNotifier = context.read<SettingsProvider>();
     final done = onDone;
     final supportsBuiltIn = _supportsBuiltInSearch(sp, ap);
     final builtInEnabled = _hasBuiltInSearchEnabled(sp, ap);
+    final supportsClaudeDynamicWebSearch = _supportsClaudeDynamicWebSearch(
+      sp,
+      ap,
+    );
+    final claudeDynamicWebSearchEnabled = _hasClaudeDynamicWebSearchEnabled(
+      sp,
+      ap,
+    );
     final builtInMode = builtInEnabled;
 
     final rows = <Widget>[];
@@ -322,7 +379,7 @@ class _SearchContent extends StatelessWidget {
         selected: false,
         onTap: () async {
           await _disableBuiltInSearch(sp, ap);
-          await settingsNotifier.setSearchEnabled(false);
+          await ap.setSearchEnabledForCurrentAssistant(false);
           done();
         },
       ),
@@ -334,13 +391,34 @@ class _SearchContent extends StatelessWidget {
         _RowItem(
           leading: Icon(Lucide.Search, size: 16, color: cs.onSurface),
           label: l10n.searchSettingsSheetBuiltinSearchTitle,
-          selected: builtInEnabled,
+          selected: builtInEnabled && !claudeDynamicWebSearchEnabled,
           onTap: () async {
-            await _enableBuiltInSearch(sp, ap);
+            await _enableBuiltInSearch(
+              sp,
+              ap,
+              useClaudeDynamicWebSearch: false,
+            );
             done();
           },
         ),
       );
+      if (supportsClaudeDynamicWebSearch) {
+        rows.add(
+          _RowItem(
+            leading: Icon(Lucide.Search, size: 16, color: cs.onSurface),
+            label: l10n.searchSettingsSheetClaudeDynamicSearchTitle,
+            selected: builtInEnabled && claudeDynamicWebSearchEnabled,
+            onTap: () async {
+              await _enableBuiltInSearch(
+                sp,
+                ap,
+                useClaudeDynamicWebSearch: true,
+              );
+              done();
+            },
+          ),
+        );
+      }
     }
 
     // 3) External services list (hidden when url_context is active)
@@ -358,7 +436,7 @@ class _SearchContent extends StatelessWidget {
             onTap: () async {
               await settingsNotifier.setSearchServiceSelected(i);
               await _disableBuiltInSearch(sp, ap);
-              await settingsNotifier.setSearchEnabled(true);
+              await ap.setSearchEnabledForCurrentAssistant(true);
               done();
             },
           ),
@@ -448,9 +526,9 @@ class _RowItemState extends State<_RowItem> {
                   widget.label,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: 13,
-                    fontWeight: FontWeight.w400,
+                    fontWeight: AppFontWeights.regular,
                     decoration: TextDecoration.none,
                   ).copyWith(color: onColor),
                 ),
@@ -485,7 +563,7 @@ class _BrandIcon extends StatelessWidget {
     if (asset == null) {
       return Text(
         name.isNotEmpty ? name.characters.first.toUpperCase() : '?',
-        style: TextStyle(fontWeight: FontWeight.w700, color: color),
+        style: TextStyle(fontWeight: AppFontWeights.emphasis, color: color),
       );
     }
     if (asset.endsWith('.svg')) {

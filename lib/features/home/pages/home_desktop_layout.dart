@@ -22,6 +22,7 @@ import '../../../desktop/hotkeys/chat_action_bus.dart';
 import '../../../desktop/hotkeys/sidebar_tab_bus.dart';
 import '../widgets/assistant_avatar.dart';
 import '../widgets/assistant_entry_actions.dart';
+import 'package:Kelivo/theme/app_font_weights.dart';
 
 /// Desktop/Tablet layout scaffold for the home page
 /// Handles the overall structure: left sidebar, main content, optional right sidebar
@@ -48,7 +49,10 @@ class HomeDesktopScaffold extends StatelessWidget {
     required this.onSelectConversation,
     required this.onNewConversation,
     required this.onCreateNewConversation,
+    required this.onToggleTemporaryConversation,
     required this.onSelectModel,
+    required this.canToggleTemporaryConversation,
+    required this.temporaryConversationEnabled,
     required this.globalSearchMode,
     required this.globalSearchQuery,
     required this.onGlobalSearchQueryChanged,
@@ -83,7 +87,10 @@ class HomeDesktopScaffold extends StatelessWidget {
   final void Function(String id) onSelectConversation;
   final VoidCallback onNewConversation;
   final Future<void> Function() onCreateNewConversation;
+  final Future<void> Function() onToggleTemporaryConversation;
   final VoidCallback onSelectModel;
+  final bool canToggleTemporaryConversation;
+  final bool temporaryConversationEnabled;
   final bool globalSearchMode;
   final String globalSearchQuery;
   final ValueChanged<String> onGlobalSearchQueryChanged;
@@ -386,7 +393,7 @@ class HomeDesktopScaffold extends StatelessWidget {
                       color: isDark
                           ? Colors.white.withValues(alpha: 0.92)
                           : cs.onSurface.withValues(alpha: 0.9),
-                      fontWeight: FontWeight.w500,
+                      fontWeight: AppFontWeights.medium,
                     ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
@@ -418,7 +425,7 @@ class HomeDesktopScaffold extends StatelessWidget {
             curve: Curves.easeOutCubic,
             child: AnimatedTextSwap(
               text: title,
-              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+              style: TextStyle(fontSize: 16, fontWeight: AppFontWeights.medium),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
@@ -548,9 +555,26 @@ class HomeDesktopScaffold extends StatelessWidget {
         size: 20,
         padding: const EdgeInsets.all(8),
         minSize: 40,
-        icon: Lucide.MessageCirclePlus,
+        semanticLabel: canToggleTemporaryConversation
+            ? AppLocalizations.of(context)!.temporaryChatToggleTooltip
+            : AppLocalizations.of(context)!.titleForLocale,
+        icon: canToggleTemporaryConversation && !temporaryConversationEnabled
+            ? Lucide.MessageCircleDashed
+            : Lucide.MessageCirclePlus,
+        builder: canToggleTemporaryConversation && temporaryConversationEnabled
+            ? (color) => SvgPicture.asset(
+                'assets/icons/temporary_chat_checked.svg',
+                width: 20,
+                height: 20,
+                colorFilter: ColorFilter.mode(color, BlendMode.srcIn),
+              )
+            : null,
         onTap: () async {
-          await onCreateNewConversation();
+          if (canToggleTemporaryConversation) {
+            await onToggleTemporaryConversation();
+          } else {
+            await onCreateNewConversation();
+          }
         },
       ),
       const SizedBox(width: 6),

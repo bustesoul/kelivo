@@ -4,10 +4,12 @@ import '../../../core/models/assistant.dart';
 import '../../../core/models/chat_message.dart';
 import '../../../core/providers/model_provider.dart';
 import '../../../core/providers/settings_provider.dart';
+import '../../../core/services/api/chat_api_service.dart';
 import '../../../core/services/chat/chat_service.dart';
 import '../../../utils/assistant_regex.dart';
 import '../../../core/models/assistant_regex.dart';
 import '../services/message_builder_service.dart';
+import '../services/ask_user_interaction_service.dart';
 import '../services/tool_handler_service.dart';
 import '../services/tool_approval_service.dart';
 import 'chat_controller.dart';
@@ -137,15 +139,17 @@ class GenerationController {
 
   /// Build tool call handler function.
   /// Delegates to ToolHandlerService.buildToolCallHandler.
-  Future<String> Function(String, Map<String, dynamic>)? buildToolCallHandler(
+  ToolCallHandler? buildToolCallHandler(
     SettingsProvider settings,
     Assistant? assistant, {
     ToolApprovalService? approvalService,
+    AskUserInteractionService? askUserService,
   }) {
     return toolHandlerService.buildToolCallHandler(
       settings,
       assistant,
       approvalService: approvalService,
+      askUserService: askUserService,
     );
   }
 
@@ -202,13 +206,14 @@ class GenerationController {
     required ChatMessage assistantMessage,
     required List<Map<String, dynamic>> apiMessages,
     required List<String> userImagePaths,
+    required bool allowImagesApiRouting,
     required String providerKey,
     required String modelId,
     required Assistant? assistant,
     required SettingsProvider settings,
     required ProviderConfig config,
     required List<Map<String, dynamic>> toolDefs,
-    Future<String> Function(String, Map<String, dynamic>)? onToolCall,
+    ToolCallHandler? onToolCall,
     Map<String, String>? extraHeaders,
     Map<String, dynamic>? extraBody,
     required bool supportsReasoning,
@@ -216,10 +221,16 @@ class GenerationController {
     required bool streamOutput,
     bool generateTitleOnFinish = true,
   }) {
+    final bool ocrActive =
+        settings.ocrEnabled &&
+        settings.ocrModelProvider != null &&
+        settings.ocrModelId != null;
+
     return stream_ctrl.GenerationContext(
       assistantMessage: assistantMessage,
       apiMessages: apiMessages,
       userImagePaths: userImagePaths,
+      allowImagesApiRouting: allowImagesApiRouting,
       providerKey: providerKey,
       modelId: modelId,
       assistant: assistant,
@@ -232,6 +243,7 @@ class GenerationController {
       supportsReasoning: supportsReasoning,
       enableReasoning: enableReasoning,
       streamOutput: streamOutput,
+      ocrActive: ocrActive,
       generateTitleOnFinish: generateTitleOnFinish,
     );
   }

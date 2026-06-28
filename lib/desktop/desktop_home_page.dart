@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:Kelivo/theme/app_font_weights.dart';
 import 'package:flutter/foundation.dart'
     show defaultTargetPlatform, TargetPlatform;
 import 'desktop_nav_rail.dart';
@@ -12,6 +13,7 @@ import 'package:window_manager/window_manager.dart';
 import 'dart:async';
 import 'hotkeys/hotkey_event_bus.dart';
 import 'hotkeys/chat_action_bus.dart';
+import 'desktop_settings_navigation_bus.dart';
 
 /// Desktop home screen: left compact rail + main content.
 /// Phase 1 focuses on structure and platform-appropriate interactions/hover.
@@ -35,6 +37,7 @@ class _DesktopHomePageState extends State<DesktopHomePage> {
   bool _globalSearchActive = false;
   StreamSubscription<HotkeyAction>? _hotkeySub;
   StreamSubscription<ChatAction>? _chatActionSub;
+  StreamSubscription<DesktopSettingsNavigationTarget>? _settingsNavSub;
 
   @override
   void initState() {
@@ -132,6 +135,20 @@ class _DesktopHomePageState extends State<DesktopHomePage> {
           });
           break;
         default:
+          break;
+      }
+    });
+    _settingsNavSub = DesktopSettingsNavigationBus.instance.stream.listen((
+      target,
+    ) {
+      if (!mounted) return;
+      switch (target) {
+        case DesktopSettingsNavigationTarget.backup:
+          setState(() {
+            _tabIndex = 3;
+            _globalSearchActive = false;
+          });
+          ChatActionBus.instance.fire(ChatAction.exitGlobalSearch);
           break;
       }
     });
@@ -272,6 +289,9 @@ class _DesktopHomePageState extends State<DesktopHomePage> {
     try {
       _chatActionSub?.cancel();
     } catch (_) {}
+    try {
+      _settingsNavSub?.cancel();
+    } catch (_) {}
     super.dispose();
   }
 }
@@ -301,7 +321,7 @@ class _TitleBarLeading extends StatelessWidget {
           l10n.aboutPageAppName,
           style: TextStyle(
             fontSize: 13,
-            fontWeight: FontWeight.w600,
+            fontWeight: AppFontWeights.semibold,
             color: cs.onSurface.withValues(alpha: 0.8),
             // Avoid accidental underline when not under a Material ancestor in edge cases
             decoration: TextDecoration.none,

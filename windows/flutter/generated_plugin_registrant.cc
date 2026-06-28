@@ -7,12 +7,14 @@
 #include "generated_plugin_registrant.h"
 
 #include <audioplayers_windows/audioplayers_windows_plugin.h>
+#include <bitsdojo_window_windows/bitsdojo_window_plugin.h>
 #include <desktop_drop/desktop_drop_plugin.h>
 #include <dynamic_color/dynamic_color_plugin_c_api.h>
 #include <file_selector_windows/file_selector_windows.h>
 #include <hotkey_manager_windows/hotkey_manager_windows_plugin_c_api.h>
 #include <irondash_engine_context/irondash_engine_context_plugin_c_api.h>
 #include <permission_handler_windows/permission_handler_windows_plugin.h>
+#include <restart_app/restart_app_plugin_c_api.h>
 #include <screen_retriever_windows/screen_retriever_windows_plugin_c_api.h>
 #include <share_plus/share_plus_windows_plugin_c_api.h>
 #include <super_native_extensions/super_native_extensions_plugin_c_api.h>
@@ -24,6 +26,8 @@
 void RegisterPlugins(flutter::PluginRegistry* registry) {
   AudioplayersWindowsPluginRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("AudioplayersWindowsPlugin"));
+  BitsdojoWindowPluginRegisterWithRegistrar(
+      registry->GetRegistrarForPlugin("BitsdojoWindowPlugin"));
   DesktopDropPluginRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("DesktopDropPlugin"));
   DynamicColorPluginCApiRegisterWithRegistrar(
@@ -36,6 +40,8 @@ void RegisterPlugins(flutter::PluginRegistry* registry) {
       registry->GetRegistrarForPlugin("IrondashEngineContextPluginCApi"));
   PermissionHandlerWindowsPluginRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("PermissionHandlerWindowsPlugin"));
+  RestartAppPluginCApiRegisterWithRegistrar(
+      registry->GetRegistrarForPlugin("RestartAppPluginCApi"));
   ScreenRetrieverWindowsPluginCApiRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("ScreenRetrieverWindowsPluginCApi"));
   SharePlusWindowsPluginCApiRegisterWithRegistrar(

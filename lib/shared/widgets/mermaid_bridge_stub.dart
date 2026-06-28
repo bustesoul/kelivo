@@ -178,8 +178,13 @@ class _MermaidInlineWindowsViewState extends State<_MermaidInlineWindowsView> {
       final b64 = await _exportCompleter!.future.timeout(
         const Duration(seconds: 8),
       );
+      if (b64 == '__UNSUPPORTED__') {
+        throw UnsupportedError('Mermaid PNG export is unsupported');
+      }
       if (b64 == null || b64.isEmpty) return null;
       return base64Decode(b64);
+    } on UnsupportedError {
+      rethrow;
     } catch (_) {
       return null;
     } finally {
@@ -214,7 +219,7 @@ class _MermaidInlineWindowsViewState extends State<_MermaidInlineWindowsView> {
     String mermaidJs,
     Map<String, String>? themeVars,
   ) {
-    final bg = dark ? '#111111' : '#ffffff';
+    final bg = dark ? '#212121' : '#f8f8f8';
     final fg = dark ? '#eaeaea' : '#222222';
     final escaped = code
         .replaceAll('&', '&amp;')
@@ -237,7 +242,7 @@ class _MermaidInlineWindowsViewState extends State<_MermaidInlineWindowsView> {
     <script>$mermaidJs</script>
     <style>
       html,body{margin:0;padding:0;background:$bg;color:$fg;}
-      .wrap{padding:8px;}
+      .wrap{padding:24px;box-sizing:border-box;}
       .mermaid{width:100%; text-align:center;}
     </style>
   </head>
@@ -259,7 +264,10 @@ class _MermaidInlineWindowsViewState extends State<_MermaidInlineWindowsView> {
       }
       function exportSvgToPng(){
         try{
-          const svg = document.querySelector('.mermaid svg');
+          if (!hasCanvasPngSupport()) { sendExport('__UNSUPPORTED__'); return; }
+          const root = document.querySelector('.mermaid');
+          if (hasMermaidRenderError(root)) { sendExport(''); return; }
+          const svg = root ? root.querySelector('svg') : null;
           if(!svg){ sendExport(''); return; }
           let w = 0, h = 0;
           try {
@@ -280,24 +288,47 @@ class _MermaidInlineWindowsViewState extends State<_MermaidInlineWindowsView> {
             w = Math.ceil(rect.width);
             h = Math.ceil(rect.height);
           }
+          const padding = 24;
           const scale = (window.devicePixelRatio || 1) * 2;
           const canvas = document.createElement('canvas');
-          canvas.width = Math.max(1, Math.floor(w * scale));
-          canvas.height = Math.max(1, Math.floor(h * scale));
+          canvas.width = Math.max(1, Math.floor((w + padding * 2) * scale));
+          canvas.height = Math.max(1, Math.floor((h + padding * 2) * scale));
           const ctx = canvas.getContext('2d');
           const xml = new XMLSerializer().serializeToString(svg);
           const img = new Image();
           img.onload = function(){
-            ctx.fillStyle = '$bg';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
-            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-            const data = canvas.toDataURL('image/png');
-            const b64 = data.split(',')[1] || '';
-            sendExport(b64);
+            try {
+              ctx.fillStyle = '$bg';
+              ctx.fillRect(0, 0, canvas.width, canvas.height);
+              ctx.drawImage(img, padding * scale, padding * scale, w * scale, h * scale);
+              const data = canvas.toDataURL('image/png');
+              const b64 = data.split(',')[1] || '';
+              sendExport(b64);
+            } catch (_) {
+              sendExport('__UNSUPPORTED__');
+            }
           };
-          img.onerror = function(){ sendExport(''); };
+          img.onerror = function(){ sendExport('__UNSUPPORTED__'); };
           img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(xml)));
         }catch(e){ sendExport(''); }
+      }
+      function hasCanvasPngSupport(){
+        try {
+          const canvas = document.createElement('canvas');
+          return !!canvas.getContext && !!canvas.getContext('2d') && typeof canvas.toDataURL === 'function';
+        } catch (_) {
+          return false;
+        }
+      }
+      function hasMermaidRenderError(root){
+        try {
+          if (!root) return true;
+          if (root.querySelector('.error-icon,.error-text,.error-message')) return true;
+          const text = (root.textContent || '').toLowerCase();
+          return text.includes('syntax error') || text.includes('parse error');
+        } catch (_) {
+          return true;
+        }
       }
       function sendExport(b64){
         if (window.chrome && window.chrome.webview) {
@@ -539,7 +570,7 @@ class _MermaidInlineWebViewState extends State<_MermaidInlineWebView> {
     String mermaidJs,
     Map<String, String>? themeVars,
   ) {
-    final bg = dark ? '#111111' : '#ffffff';
+    final bg = dark ? '#212121' : '#f8f8f8';
     final fg = dark ? '#eaeaea' : '#222222';
     final escaped = code
         .replaceAll('&', '&amp;')
@@ -563,7 +594,7 @@ class _MermaidInlineWebViewState extends State<_MermaidInlineWebView> {
     <script>$mermaidJs</script>
     <style>
       html,body{margin:0;padding:0;background:$bg;color:$fg;}
-      .wrap{padding:8px;}
+      .wrap{padding:24px;box-sizing:border-box;}
       .mermaid{width:100%; text-align:center;}
     </style>
   </head>
@@ -583,7 +614,10 @@ class _MermaidInlineWebViewState extends State<_MermaidInlineWebView> {
       }
       window.exportSvgToPng = function(){
         try{
-          const svg = document.querySelector('.mermaid svg');
+          if (!hasCanvasPngSupport()) { ExportChannel.postMessage('__UNSUPPORTED__'); return; }
+          const root = document.querySelector('.mermaid');
+          if (hasMermaidRenderError(root)) { ExportChannel.postMessage(''); return; }
+          const svg = root ? root.querySelector('svg') : null;
           if(!svg){ ExportChannel.postMessage(''); return; }
           let w = 0, h = 0;
           try {
@@ -604,27 +638,50 @@ class _MermaidInlineWebViewState extends State<_MermaidInlineWebView> {
             w = Math.ceil(rect.width);
             h = Math.ceil(rect.height);
           }
+          const padding = 24;
           const scale = (window.devicePixelRatio || 1) * 2;
           const canvas = document.createElement('canvas');
-          canvas.width = Math.max(1, Math.floor(w * scale));
-          canvas.height = Math.max(1, Math.floor(h * scale));
+          canvas.width = Math.max(1, Math.floor((w + padding * 2) * scale));
+          canvas.height = Math.max(1, Math.floor((h + padding * 2) * scale));
           const ctx = canvas.getContext('2d');
           const xml = new XMLSerializer().serializeToString(svg);
           const img = new Image();
           img.onload = function(){
-            ctx.fillStyle = '$bg';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
-            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-            const data = canvas.toDataURL('image/png');
-            const b64 = data.split(',')[1] || '';
-            ExportChannel.postMessage(b64);
+            try {
+              ctx.fillStyle = '$bg';
+              ctx.fillRect(0, 0, canvas.width, canvas.height);
+              ctx.drawImage(img, padding * scale, padding * scale, w * scale, h * scale);
+              const data = canvas.toDataURL('image/png');
+              const b64 = data.split(',')[1] || '';
+              ExportChannel.postMessage(b64);
+            } catch (_) {
+              ExportChannel.postMessage('__UNSUPPORTED__');
+            }
           };
-          img.onerror = function(){ ExportChannel.postMessage(''); };
+          img.onerror = function(){ ExportChannel.postMessage('__UNSUPPORTED__'); };
           img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(xml)));
         }catch(e){
           ExportChannel.postMessage('');
         }
       };
+      function hasCanvasPngSupport(){
+        try {
+          const canvas = document.createElement('canvas');
+          return !!canvas.getContext && !!canvas.getContext('2d') && typeof canvas.toDataURL === 'function';
+        } catch (_) {
+          return false;
+        }
+      }
+      function hasMermaidRenderError(root){
+        try {
+          if (!root) return true;
+          if (root.querySelector('.error-icon,.error-text,.error-message')) return true;
+          const text = (root.textContent || '').toLowerCase();
+          return text.includes('syntax error') || text.includes('parse error');
+        } catch (_) {
+          return true;
+        }
+      }
       mermaid.initialize({ startOnLoad:false, theme: '${dark ? 'dark' : 'default'}', securityLevel:'loose', fontFamily: 'inherit', themeVariables: $themeVarsJson });
       mermaid.run({ querySelector: '.mermaid' }).then(postHeight).catch(postHeight);
       window.addEventListener('resize', postHeight);
@@ -710,9 +767,14 @@ class _MermaidInlineWebViewState extends State<_MermaidInlineWebView> {
       final b64 = await _exportCompleter!.future.timeout(
         const Duration(seconds: 8),
       );
+      if (b64 == '__UNSUPPORTED__') {
+        throw UnsupportedError('Mermaid PNG export is unsupported');
+      }
       if (b64 == null || b64.isEmpty) return null;
       final bytes = base64Decode(b64);
       return bytes;
+    } on UnsupportedError {
+      rethrow;
     } catch (_) {
       return null;
     } finally {

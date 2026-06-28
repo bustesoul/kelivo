@@ -13,6 +13,7 @@ import '../../../utils/sandbox_path_resolver.dart';
 import '../../../core/services/haptics.dart';
 import 'package:flutter_slidable/flutter_slidable.dart';
 import '../../../shared/widgets/snackbar.dart';
+import '../../../theme/app_font_weights.dart';
 
 class AssistantSettingsPage extends StatelessWidget {
   const AssistantSettingsPage({super.key});
@@ -66,8 +67,7 @@ class AssistantSettingsPage extends StatelessWidget {
       body: ReorderableListView.builder(
         padding: const EdgeInsets.fromLTRB(12, 12, 12, 100),
         itemCount: assistants.length,
-        onReorder: (oldIndex, newIndex) async {
-          if (newIndex > oldIndex) newIndex -= 1;
+        onReorderItem: (oldIndex, newIndex) async {
           // Immediately update UI for smooth experience
           final assistantProvider = context.read<AssistantProvider>();
           await assistantProvider.reorderAssistants(oldIndex, newIndex);
@@ -163,17 +163,12 @@ class _AssistantCard extends StatelessWidget {
                                   item.name,
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
+                                  style: TextStyle(
                                     fontSize: 16,
-                                    fontWeight: FontWeight.w700,
+                                    fontWeight: AppFontWeights.emphasis,
                                   ),
                                 ),
                               ),
-                              if (!item.deletable)
-                                _TagPill(
-                                  text: l10n.assistantSettingsDefaultTag,
-                                  color: cs.primary,
-                                ),
                             ],
                           ),
                           const SizedBox(height: 4),
@@ -250,7 +245,7 @@ class _AssistantCard extends StatelessWidget {
                           l10n.assistantSettingsCopyButton,
                           style: TextStyle(
                             color: cs.primary,
-                            fontWeight: FontWeight.w700,
+                            fontWeight: AppFontWeights.emphasis,
                           ),
                         ),
                       ],
@@ -311,7 +306,7 @@ class _AssistantCard extends StatelessWidget {
                           l10n.assistantSettingsDeleteButton,
                           style: TextStyle(
                             color: cs.error,
-                            fontWeight: FontWeight.w700,
+                            fontWeight: AppFontWeights.emphasis,
                           ),
                         ),
                       ],
@@ -467,9 +462,9 @@ Future<String?> _showAddAssistantSheet(BuildContext context) async {
               Center(
                 child: Text(
                   l10n.assistantSettingsAddSheetTitle,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: 16,
-                    fontWeight: FontWeight.w600,
+                    fontWeight: AppFontWeights.semibold,
                   ),
                 ),
               ),
@@ -633,7 +628,7 @@ class _AssistantAvatar extends StatelessWidget {
         letter,
         style: TextStyle(
           color: cs.primary,
-          fontWeight: FontWeight.w700,
+          fontWeight: AppFontWeights.emphasis,
           fontSize: size * 0.42,
         ),
       ),
@@ -697,7 +692,10 @@ class _IosOutlineButtonState extends State<_IosOutlineButton> {
           ),
           child: Text(
             widget.label,
-            style: TextStyle(color: cs.primary, fontWeight: FontWeight.w600),
+            style: TextStyle(
+              color: cs.primary,
+              fontWeight: AppFontWeights.semibold,
+            ),
           ),
         ),
       ),
@@ -745,35 +743,11 @@ class _IosFilledButtonState extends State<_IosFilledButton> {
           ),
           child: Text(
             widget.label,
-            style: TextStyle(color: cs.onPrimary, fontWeight: FontWeight.w600),
+            style: TextStyle(
+              color: cs.onPrimary,
+              fontWeight: AppFontWeights.semibold,
+            ),
           ),
-        ),
-      ),
-    );
-  }
-}
-
-class _TagPill extends StatelessWidget {
-  const _TagPill({required this.text, required this.color});
-  final String text;
-  final Color color;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.only(left: 8),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: color.withValues(alpha: 0.35)),
-      ),
-      child: Text(
-        text,
-        style: TextStyle(
-          fontSize: 11,
-          color: color,
-          fontWeight: FontWeight.w700,
         ),
       ),
     );

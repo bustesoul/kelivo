@@ -29,7 +29,7 @@ class _DesktopAssistantsBody extends StatelessWidget {
                           )!.desktopAssistantsListTitle,
                           style: TextStyle(
                             fontSize: 14,
-                            fontWeight: FontWeight.w400,
+                            fontWeight: AppFontWeights.regular,
                             color: cs.onSurface.withValues(alpha: 0.9),
                           ),
                         ),
@@ -49,8 +49,7 @@ class _DesktopAssistantsBody extends StatelessWidget {
                     buildDefaultDragHandles: false,
                     padding: EdgeInsets.zero,
                     itemCount: assistants.length,
-                    onReorder: (oldIndex, newIndex) async {
-                      if (newIndex > oldIndex) newIndex -= 1;
+                    onReorderItem: (oldIndex, newIndex) async {
                       await context.read<AssistantProvider>().reorderAssistants(
                         oldIndex,
                         newIndex,
@@ -178,9 +177,9 @@ Future<String?> _showAddAssistantDesktopDialog(BuildContext context) async {
                       Expanded(
                         child: Text(
                           l10n.assistantSettingsAddSheetTitle,
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 13.5,
-                            fontWeight: FontWeight.w700,
+                            fontWeight: AppFontWeights.emphasis,
                           ),
                         ),
                       ),
@@ -376,9 +375,9 @@ Future<bool?> _confirmDeleteDesktop(BuildContext context) async {
                               l10n.assistantSettingsDeleteDialogTitle,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
+                              style: TextStyle(
                                 fontSize: 13,
-                                fontWeight: FontWeight.w700,
+                                fontWeight: AppFontWeights.emphasis,
                               ),
                             ),
                           ),
@@ -524,7 +523,7 @@ class _DeskIosButtonState extends State<_DeskIosButton> {
               widget.label,
               style: TextStyle(
                 color: textColor,
-                fontWeight: FontWeight.w600,
+                fontWeight: AppFontWeights.semibold,
                 fontSize: widget.dense ? 13 : 14,
               ),
             ),
@@ -586,37 +585,12 @@ class _DesktopAssistantCardState extends State<_DesktopAssistantCard> {
                               widget.item.name,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
+                              style: TextStyle(
                                 fontSize: 16,
-                                fontWeight: FontWeight.w700,
+                                fontWeight: AppFontWeights.emphasis,
                               ),
                             ),
                           ),
-                          if (!widget.item.deletable)
-                            Container(
-                              margin: const EdgeInsets.only(left: 8),
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 8,
-                                vertical: 2,
-                              ),
-                              decoration: BoxDecoration(
-                                color: cs.primary.withValues(alpha: 0.12),
-                                borderRadius: BorderRadius.circular(999),
-                                border: Border.all(
-                                  color: cs.primary.withValues(alpha: 0.35),
-                                ),
-                              ),
-                              child: Text(
-                                AppLocalizations.of(
-                                  context,
-                                )!.assistantSettingsDefaultTag,
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  color: cs.primary,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                            ),
                           _CopyAssistantIcon(
                             onCopy: () async {
                               final assistantProvider = context
@@ -768,7 +742,7 @@ class _AssistantAvatarDesktop extends StatelessWidget {
         letter,
         style: TextStyle(
           color: cs.primary,
-          fontWeight: FontWeight.w700,
+          fontWeight: AppFontWeights.emphasis,
           fontSize: size * 0.42,
         ),
       ),

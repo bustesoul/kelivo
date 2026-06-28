@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:provider/provider.dart';
@@ -11,11 +13,14 @@ import 'model_detail_sheet.dart';
 import '../../provider/pages/provider_detail_page.dart';
 import '../../../l10n/app_localizations.dart';
 import '../../../utils/brand_assets.dart';
+import '../../../utils/provider_grouping_logic.dart';
 import '../../../shared/widgets/ios_tactile.dart';
 import '../../../shared/widgets/model_tag_wrap.dart';
 import '../../../desktop/desktop_home_page.dart' show DesktopHomePage;
 import '../../provider/widgets/provider_avatar.dart';
+import '../../provider/widgets/provider_balance_badge.dart';
 import '../../../core/services/model_override_resolver.dart';
+import '../../../theme/app_font_weights.dart';
 
 class ModelSelection {
   final String providerKey;
@@ -60,6 +65,25 @@ class _ModelProcessingResult {
 // Lightweight brand asset resolver usable in isolates
 String? _assetForNameStatic(String n) {
   return BrandAssets.assetForName(n);
+}
+
+List<String> _buildDisplayProvidersOrder(
+  SettingsProvider settings,
+  Iterable<String> providerKeys,
+) {
+  final knownKeys = providerKeys.where((e) => e.trim().isNotEmpty);
+  final providerGroupMap = <String, String>{};
+  for (final key in knownKeys) {
+    final groupId = settings.groupIdForProvider(key);
+    if (groupId != null) providerGroupMap[key] = groupId;
+  }
+  return buildProviderKeysInGroupedDisplayOrder(
+    providersOrder: settings.providersOrder,
+    groups: settings.providerGroups,
+    ungroupedIndex: settings.providerUngroupedDisplayIndex,
+    providerGroupMap: providerGroupMap,
+    knownProviderKeys: providerKeys,
+  );
 }
 
 // Static function for compute - must be top-level
@@ -176,6 +200,8 @@ _ModelProcessingResult _processModelsInBackground(_ModelProcessingData data) {
 Future<ModelSelection?> showModelSelector(
   BuildContext context, {
   String? limitProviderKey,
+  String? initialProviderKey,
+  String? initialModelId,
 }) async {
   if (_modelSelectorOpen) return null;
   _modelSelectorOpen = true;
@@ -188,6 +214,8 @@ Future<ModelSelection?> showModelSelector(
       return await _showDesktopModelSelector(
         context,
         limitProviderKey: limitProviderKey,
+        initialProviderKey: initialProviderKey,
+        initialModelId: initialModelId,
       );
     }
     final cs = Theme.of(context).colorScheme;
@@ -198,7 +226,11 @@ Future<ModelSelection?> showModelSelector(
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      builder: (ctx) => _ModelSelectSheet(limitProviderKey: limitProviderKey),
+      builder: (ctx) => _ModelSelectSheet(
+        limitProviderKey: limitProviderKey,
+        initialProviderKey: initialProviderKey,
+        initialModelId: initialModelId,
+      ),
     );
   } finally {
     _modelSelectorOpen = false;
@@ -232,8 +264,14 @@ Future<void> showModelSelectSheet(
 }
 
 class _ModelSelectSheet extends StatefulWidget {
-  const _ModelSelectSheet({this.limitProviderKey});
+  const _ModelSelectSheet({
+    this.limitProviderKey,
+    this.initialProviderKey,
+    this.initialModelId,
+  });
   final String? limitProviderKey;
+  final String? initialProviderKey;
+  final String? initialModelId;
   @override
   State<_ModelSelectSheet> createState() => _ModelSelectSheetState();
 }
@@ -242,9 +280,23 @@ class _ModelSelectSheetState extends State<_ModelSelectSheet> {
   final TextEditingController _search = TextEditingController();
   final DraggableScrollableController _sheetCtrl =
       DraggableScrollableController();
+  final ScrollController _providerTabsController = ScrollController();
+  final GlobalKey _providerTabsViewportKey = GlobalKey(
+    debugLabel: 'model-selector-provider-tabs-viewport',
+  );
+  final Map<String, GlobalKey> _providerTabKeys = <String, GlobalKey>{};
   static const double _initialSize = 0.8;
   static const double _maxSize = 0.8;
+  static const double _stickyProviderHeaderHeight = 30;
+  static const double _estimatedHeaderExtent = 39;
+  static const double _estimatedModelExtent = 79;
+  static const double _listBottomPadding = 12;
+  // static const double _currentSelectionScrollMargin = 10;
   String _lastQuery = '';
+  String? _activeProviderKey;
+  int _stickySwitchDirection = 1;
+  bool _activeProviderUpdateScheduled = false;
+  double _listViewportHeight = 0;
   // ScrollablePositionedList controllers
   final ItemScrollController _itemScrollController = ItemScrollController();
   final ItemPositionsListener _itemPositionsListener =
@@ -310,9 +362,29 @@ class _ModelSelectSheetState extends State<_ModelSelectSheet> {
     return out;
   }
 
+  String _currentModelKey(
+    SettingsProvider settings,
+    AssistantProvider assistantProvider,
+  ) {
+    final hasInitial =
+        widget.initialProviderKey != null && widget.initialModelId != null;
+    final provider = hasInitial
+        ? widget.initialProviderKey
+        : assistantProvider.currentAssistant?.chatModelProvider ??
+              settings.currentModelProvider;
+    final modelId = hasInitial
+        ? widget.initialModelId
+        : assistantProvider.currentAssistant?.chatModelId ??
+              settings.currentModelId;
+    return (provider != null && modelId != null) ? '$provider::$modelId' : '';
+  }
+
   @override
   void initState() {
     super.initState();
+    _itemPositionsListener.itemPositions.addListener(
+      _scheduleActiveProviderUpdate,
+    );
     // Delay loading to allow the sheet to open first
     Future.delayed(const Duration(milliseconds: 50), () {
       if (mounted) {
@@ -324,22 +396,20 @@ class _ModelSelectSheetState extends State<_ModelSelectSheet> {
   Future<void> _loadModelsAsync() async {
     try {
       final settings = context.read<SettingsProvider>();
-      final assistant = context.read<AssistantProvider>().currentAssistant;
+      final assistantProvider = context.read<AssistantProvider>();
+      final providerConfigs = _buildProviderConfigsPayload(settings);
 
-      // Determine current model - use assistant's model if set, otherwise global default
-      final currentProvider =
-          assistant?.chatModelProvider ?? settings.currentModelProvider;
-      final currentModelId = assistant?.chatModelId ?? settings.currentModelId;
-      final currentKey = (currentProvider != null && currentModelId != null)
-          ? '$currentProvider::$currentModelId'
-          : '';
+      final currentKey = _currentModelKey(settings, assistantProvider);
 
       // Prepare data for background processing
       final processingData = _ModelProcessingData(
-        providerConfigs: _buildProviderConfigsPayload(settings),
+        providerConfigs: providerConfigs,
         pinnedModels: settings.pinnedModels,
         currentModelKey: currentKey,
-        providersOrder: settings.providersOrder,
+        providersOrder: _buildDisplayProvidersOrder(
+          settings,
+          providerConfigs.keys,
+        ),
         limitProviderKey: widget.limitProviderKey,
         disableResolverPlatformLogging: true,
       );
@@ -352,6 +422,7 @@ class _ModelSelectSheetState extends State<_ModelSelectSheet> {
           _groups = result.groups;
           _orderedKeys = result.orderedKeys;
           _isLoading = false;
+          _activeProviderKey = null;
         });
         _scheduleAutoScrollToCurrent();
       }
@@ -384,21 +455,19 @@ class _ModelSelectSheetState extends State<_ModelSelectSheet> {
 
   void _loadModelsSynchronously() {
     final settings = context.read<SettingsProvider>();
-    final assistant = context.read<AssistantProvider>().currentAssistant;
+    final assistantProvider = context.read<AssistantProvider>();
+    final providerConfigs = _buildProviderConfigsPayload(settings);
 
-    // Determine current model - use assistant's model if set, otherwise global default
-    final currentProvider =
-        assistant?.chatModelProvider ?? settings.currentModelProvider;
-    final currentModelId = assistant?.chatModelId ?? settings.currentModelId;
-    final currentKey = (currentProvider != null && currentModelId != null)
-        ? '$currentProvider::$currentModelId'
-        : '';
+    final currentKey = _currentModelKey(settings, assistantProvider);
 
     final processingData = _ModelProcessingData(
-      providerConfigs: _buildProviderConfigsPayload(settings),
+      providerConfigs: providerConfigs,
       pinnedModels: settings.pinnedModels,
       currentModelKey: currentKey,
-      providersOrder: settings.providersOrder,
+      providersOrder: _buildDisplayProvidersOrder(
+        settings,
+        providerConfigs.keys,
+      ),
       limitProviderKey: widget.limitProviderKey,
       disableResolverPlatformLogging: false,
     );
@@ -409,6 +478,7 @@ class _ModelSelectSheetState extends State<_ModelSelectSheet> {
       _groups = result.groups;
       _orderedKeys = result.orderedKeys;
       _isLoading = false;
+      _activeProviderKey = null;
     });
     _scheduleAutoScrollToCurrent();
   }
@@ -431,25 +501,11 @@ class _ModelSelectSheetState extends State<_ModelSelectSheet> {
       return;
     }
 
-    final settings = context.read<SettingsProvider>();
-    final assistant = context.read<AssistantProvider>().currentAssistant;
-
-    // Use assistant's model if set, otherwise fall back to global default
-    final pk = assistant?.chatModelProvider ?? settings.currentModelProvider;
-    final mid = assistant?.chatModelId ?? settings.currentModelId;
-    if (pk == null || mid == null) return;
-
     // Optionally expand a bit for better context
     await _expandSheetIfNeeded(
       _initialSize.clamp(0.0, _maxSize),
       duration: const Duration(milliseconds: 200),
     );
-
-    // If current model is pinned and favorites section is visible, jump there first
-    final currentKey = '$pk::$mid';
-    final bool showFavorites =
-        widget.limitProviderKey == null && (_search.text.isEmpty);
-    final bool isPinned = settings.pinnedModels.contains(currentKey);
 
     // Ensure the list is attached before attempting to scroll
     if (!_itemScrollController.isAttached) {
@@ -462,17 +518,14 @@ class _ModelSelectSheetState extends State<_ModelSelectSheet> {
       return;
     }
 
-    int? targetIndex;
-    if (showFavorites && isPinned) {
-      targetIndex = _favModelIndexMap[currentKey];
-    }
-    targetIndex ??= _modelIndexMap[currentKey];
-    targetIndex ??= _headerIndexMap[pk];
+    final targetIndex = _currentSelectionTargetIndex();
 
     if (targetIndex != null) {
+      final alignment = _currentSelectionScrollAlignment(targetIndex);
       try {
         await _itemScrollController.scrollTo(
           index: targetIndex,
+          alignment: alignment,
           duration: const Duration(milliseconds: 360),
           curve: Curves.easeOutCubic,
         );
@@ -483,7 +536,8 @@ class _ModelSelectSheetState extends State<_ModelSelectSheet> {
           if (!mounted || _autoScrolled) return;
           try {
             await _itemScrollController.scrollTo(
-              index: targetIndex!,
+              index: targetIndex,
+              alignment: alignment,
               duration: const Duration(milliseconds: 360),
               curve: Curves.easeOutCubic,
             );
@@ -492,6 +546,58 @@ class _ModelSelectSheetState extends State<_ModelSelectSheet> {
         });
       }
     }
+  }
+
+  int? _currentSelectionTargetIndex() {
+    if (_search.text.trim().isNotEmpty) return null;
+
+    final settings = context.read<SettingsProvider>();
+
+    final currentKey = _currentModelKey(
+      settings,
+      context.read<AssistantProvider>(),
+    );
+    if (currentKey.isEmpty) return null;
+
+    if (widget.limitProviderKey == null &&
+        settings.pinnedModels.contains(currentKey)) {
+      final favIndex = _favModelIndexMap[currentKey];
+      if (favIndex != null) return favIndex;
+    }
+
+    final separator = currentKey.indexOf('::');
+    final pk = separator == -1
+        ? currentKey
+        : currentKey.substring(0, separator);
+    return _modelIndexMap[currentKey] ?? _headerIndexMap[pk];
+  }
+
+  double _currentSelectionScrollAlignment(int targetIndex) {
+    if (_listViewportHeight <= 0) {
+      return 0;
+    }
+    final topAlignment = widget.limitProviderKey == null
+        ? (_stickyProviderHeaderHeight / _listViewportHeight).clamp(0.0, 0.3)
+        : 0.0;
+    if (_rows.length <= 1) return topAlignment;
+
+    final remainingExtent = _estimatedRemainingExtentFrom(targetIndex);
+    final topAlignedRequiredExtent = _listViewportHeight * (1 - topAlignment);
+    if (remainingExtent >= topAlignedRequiredExtent) return topAlignment;
+
+    final tailAlignment = 1.0 - (remainingExtent / _listViewportHeight);
+    return tailAlignment.clamp(topAlignment, 0.72);
+  }
+
+  double _estimatedRemainingExtentFrom(int targetIndex) {
+    var extent = _listBottomPadding;
+    for (var i = targetIndex; i < _rows.length; i++) {
+      final row = _rows[i];
+      extent += row is _HeaderRow
+          ? _estimatedHeaderExtent
+          : _estimatedModelExtent;
+    }
+    return extent;
   }
 
   // Scroll to the first matching provider group when searching.
@@ -539,8 +645,12 @@ class _ModelSelectSheetState extends State<_ModelSelectSheet> {
 
   @override
   void dispose() {
+    _itemPositionsListener.itemPositions.removeListener(
+      _scheduleActiveProviderUpdate,
+    );
     _search.dispose();
     _sheetCtrl.dispose();
+    _providerTabsController.dispose();
     super.dispose();
   }
 
@@ -558,6 +668,112 @@ class _ModelSelectSheetState extends State<_ModelSelectSheet> {
     final lowerQuery = query.toLowerCase();
     final lowerProviderName = providerName.toLowerCase();
     return lowerProviderName.contains(lowerQuery);
+  }
+
+  GlobalKey _providerTabKeyFor(String providerKey) {
+    return _providerTabKeys.putIfAbsent(
+      providerKey,
+      () => GlobalKey(debugLabel: 'model-selector-provider-tab-$providerKey'),
+    );
+  }
+
+  String? _providerKeyForRow(int index) {
+    if (index < 0 || index >= _rows.length) return null;
+    final row = _rows[index];
+    if (row is _HeaderRow) return row.providerKey;
+    if (row is _ModelRow && !row.showProviderLabel) return row.item.providerKey;
+    return null;
+  }
+
+  String? _activeProviderKeyFromVisibleRows() {
+    final positions =
+        _itemPositionsListener.itemPositions.value
+            .where((p) => p.itemTrailingEdge > 0 && p.itemLeadingEdge < 1)
+            .toList()
+          ..sort((a, b) => a.itemLeadingEdge.compareTo(b.itemLeadingEdge));
+    if (positions.isEmpty || _rows.isEmpty) return null;
+
+    final topIndex = positions.first.index;
+    final directKey = _providerKeyForRow(topIndex);
+    if (directKey != null) return directKey;
+
+    for (var i = topIndex - 1; i >= 0; i--) {
+      final key = _providerKeyForRow(i);
+      if (key != null) return key;
+    }
+    return null;
+  }
+
+  void _scheduleActiveProviderUpdate() {
+    if (!mounted || _activeProviderUpdateScheduled) return;
+    _activeProviderUpdateScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _activeProviderUpdateScheduled = false;
+      if (mounted) _syncActiveProviderFromVisibleRows();
+    });
+  }
+
+  void _syncActiveProviderFromVisibleRows() {
+    if (widget.limitProviderKey != null || _rows.isEmpty) return;
+    final nextKey = _activeProviderKeyFromVisibleRows();
+    if (nextKey == _activeProviderKey) return;
+    final previousKey = _activeProviderKey;
+    final previousIndex = previousKey == null
+        ? -1
+        : _orderedKeys.indexOf(previousKey);
+    final nextIndex = nextKey == null ? -1 : _orderedKeys.indexOf(nextKey);
+    setState(() {
+      if (previousIndex != -1 && nextIndex != -1) {
+        _stickySwitchDirection = nextIndex >= previousIndex ? 1 : -1;
+      }
+      _activeProviderKey = nextKey;
+    });
+    if (nextKey != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _scrollProviderTabIntoView(nextKey);
+      });
+    }
+  }
+
+  void _scrollProviderTabIntoView(String providerKey) {
+    final tabContext = _providerTabKeys[providerKey]?.currentContext;
+    final viewportContext = _providerTabsViewportKey.currentContext;
+    if (!mounted ||
+        tabContext == null ||
+        viewportContext == null ||
+        !_providerTabsController.hasClients) {
+      return;
+    }
+
+    final tabBox = tabContext.findRenderObject();
+    final viewportBox = viewportContext.findRenderObject();
+    if (tabBox is! RenderBox || viewportBox is! RenderBox) return;
+
+    final tabLeft = tabBox.localToGlobal(Offset.zero).dx;
+    final tabRight = tabLeft + tabBox.size.width;
+    final viewportLeft = viewportBox.localToGlobal(Offset.zero).dx;
+    final viewportRight = viewportLeft + viewportBox.size.width;
+
+    var targetOffset = _providerTabsController.offset;
+    if (tabLeft < viewportLeft) {
+      targetOffset += tabLeft - viewportLeft;
+    } else if (tabRight > viewportRight) {
+      targetOffset += tabRight - viewportRight;
+    } else {
+      return;
+    }
+
+    targetOffset = targetOffset.clamp(
+      _providerTabsController.position.minScrollExtent,
+      _providerTabsController.position.maxScrollExtent,
+    );
+    unawaited(
+      _providerTabsController.animateTo(
+        targetOffset,
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOutCubic,
+      ),
+    );
   }
 
   @override
@@ -780,7 +996,12 @@ class _ModelSelectSheetState extends State<_ModelSelectSheet> {
         }
         if (favs.isNotEmpty) {
           _headerIndexMap['__fav__'] = _rows.length;
-          _rows.add(_HeaderRow(l10n.modelSelectSheetFavoritesSection));
+          _rows.add(
+            _HeaderRow(
+              l10n.modelSelectSheetFavoritesSection,
+              isFavorites: true,
+            ),
+          );
           for (final m in favs) {
             _favModelIndexMap['${m.providerKey}::${m.id}'] = _rows.length;
             _rows.add(_ModelRow(m, showProviderLabel: true));
@@ -809,7 +1030,7 @@ class _ModelSelectSheetState extends State<_ModelSelectSheet> {
       }
       if (items.isEmpty) continue;
       _headerIndexMap[pk] = _rows.length;
-      _rows.add(_HeaderRow(g.name));
+      _rows.add(_HeaderRow(g.name, providerKey: pk));
       for (final m in items) {
         _modelIndexMap['${m.providerKey}::${m.id}'] = _rows.length;
         _rows.add(_ModelRow(m));
@@ -818,23 +1039,50 @@ class _ModelSelectSheetState extends State<_ModelSelectSheet> {
 
     if (_rows.isEmpty) return const SizedBox.shrink();
 
-    return ScrollablePositionedList.builder(
-      itemCount: _rows.length,
-      itemScrollController: _itemScrollController,
-      itemPositionsListener: _itemPositionsListener,
-      padding: const EdgeInsets.only(bottom: 12),
-      itemBuilder: (context, index) {
-        final row = _rows[index];
-        if (row is _HeaderRow) {
-          return _sectionHeader(context, row.title);
-        } else if (row is _ModelRow) {
-          return _modelTile(
-            context,
-            row.item,
-            showProviderLabel: row.showProviderLabel,
-          );
-        }
-        return const SizedBox.shrink();
+    _scheduleActiveProviderUpdate();
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        _listViewportHeight = constraints.maxHeight;
+        return Stack(
+          children: [
+            ScrollablePositionedList.builder(
+              itemCount: _rows.length,
+              itemScrollController: _itemScrollController,
+              itemPositionsListener: _itemPositionsListener,
+              padding: const EdgeInsets.only(bottom: 12),
+              itemBuilder: (context, index) {
+                final row = _rows[index];
+                if (row is _HeaderRow) {
+                  return _sectionHeader(
+                    context,
+                    row.title,
+                    providerKey: row.providerKey,
+                  );
+                } else if (row is _ModelRow) {
+                  return _modelTile(
+                    context,
+                    row.item,
+                    showProviderLabel: row.showProviderLabel,
+                  );
+                }
+                return const SizedBox.shrink();
+              },
+            ),
+            if (widget.limitProviderKey == null)
+              Positioned(
+                top: -1,
+                left: 0,
+                right: 0,
+                child: ColoredBox(
+                  key: const ValueKey('model-selector-top-seam-cover'),
+                  color: Theme.of(context).colorScheme.surface,
+                  child: const SizedBox(height: 1),
+                ),
+              ),
+            if (_activeProviderKey != null) _stickyProviderHeader(context),
+          ],
+        );
       },
     );
   }
@@ -850,6 +1098,7 @@ class _ModelSelectSheetState extends State<_ModelSelectSheet> {
           selectedProviderKey = pk;
         }
       });
+      _providerTabKeys.removeWhere((key, _) => !_orderedKeys.contains(key));
       for (final k in _orderedKeys) {
         final g = _groups[k];
         if (g != null) {
@@ -871,24 +1120,132 @@ class _ModelSelectSheetState extends State<_ModelSelectSheet> {
       // SafeArea already applies bottom inset; avoid doubling it here.
       padding: const EdgeInsets.only(left: 12, right: 12, top: 8, bottom: 10),
       child: SingleChildScrollView(
+        key: _providerTabsViewportKey,
+        controller: _providerTabsController,
         scrollDirection: Axis.horizontal,
         child: Row(children: providerTabs),
       ),
     );
   }
 
-  Widget _sectionHeader(BuildContext context, String title) {
+  Widget _stickyProviderHeader(BuildContext context) {
+    if (widget.limitProviderKey != null) return const SizedBox.shrink();
+    final providerKey = _activeProviderKey;
+    if (providerKey == null) return const SizedBox.shrink();
+    final group = _groups[providerKey];
+    if (group == null) return const SizedBox.shrink();
+
+    final cs = Theme.of(context).colorScheme;
+    return Positioned(
+      top: -1,
+      left: 0,
+      right: 0,
+      child: DecoratedBox(
+        key: const ValueKey('model-selector-sticky-provider'),
+        decoration: BoxDecoration(color: cs.surface),
+        child: SizedBox(
+          height: _stickyProviderHeaderHeight + 1,
+          child: ClipRect(
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 220),
+              reverseDuration: const Duration(milliseconds: 180),
+              switchInCurve: Curves.easeOutCubic,
+              switchOutCurve: Curves.easeOutCubic,
+              layoutBuilder: (currentChild, previousChildren) {
+                return Stack(
+                  alignment: Alignment.centerLeft,
+                  children: [
+                    ...previousChildren,
+                    if (currentChild != null) currentChild,
+                  ],
+                );
+              },
+              transitionBuilder: (child, animation) {
+                final isIncoming =
+                    child.key == ValueKey('sticky-provider-$providerKey');
+                final dy = (isIncoming ? 0.65 : -0.65) * _stickySwitchDirection;
+                final offsetAnimation = Tween<Offset>(
+                  begin: Offset(0, dy),
+                  end: Offset.zero,
+                ).animate(animation);
+                return FadeTransition(
+                  opacity: animation,
+                  child: SlideTransition(
+                    position: offsetAnimation,
+                    child: child,
+                  ),
+                );
+              },
+              child: Padding(
+                key: ValueKey('sticky-provider-$providerKey'),
+                padding: const EdgeInsets.fromLTRB(16, 6, 16, 5),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        group.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: AppFontWeights.emphasis,
+                          color: cs.onSurface.withValues(alpha: 0.68),
+                        ),
+                      ),
+                    ),
+                    ProviderBalanceBadge(
+                      providerKey: providerKey,
+                      displayName: group.name,
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: AppFontWeights.emphasis,
+                      ),
+                      color: cs.primary,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _sectionHeader(
+    BuildContext context,
+    String title, {
+    String? providerKey,
+  }) {
     final cs = Theme.of(context).colorScheme;
     return Container(
       alignment: Alignment.centerLeft,
       padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
-      child: Text(
-        title,
-        style: TextStyle(
-          fontSize: 12,
-          fontWeight: FontWeight.w600,
-          color: cs.onSurface.withValues(alpha: 0.6),
-        ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: AppFontWeights.semibold,
+                color: cs.onSurface.withValues(alpha: 0.6),
+              ),
+            ),
+          ),
+          if (providerKey != null)
+            ProviderBalanceBadge(
+              providerKey: providerKey,
+              displayName: title,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: AppFontWeights.emphasis,
+              ),
+              color: cs.primary,
+            ),
+        ],
       ),
     );
   }
@@ -944,18 +1301,18 @@ class _ModelSelectSheetState extends State<_ModelSelectSheet> {
                           m.info.displayName,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 14,
-                            fontWeight: FontWeight.w600,
+                            fontWeight: AppFontWeights.semibold,
                           ),
                         )
                       else
                         Text.rich(
                           TextSpan(
                             text: m.info.displayName,
-                            style: const TextStyle(
+                            style: TextStyle(
                               fontSize: 14,
-                              fontWeight: FontWeight.w600,
+                              fontWeight: AppFontWeights.semibold,
                             ),
                             children: [
                               TextSpan(
@@ -1013,8 +1370,10 @@ class _ModelSelectSheetState extends State<_ModelSelectSheet> {
   }) {
     final cs = Theme.of(context).colorScheme;
     return Padding(
+      key: _providerTabKeyFor(key),
       padding: const EdgeInsets.symmetric(horizontal: 4),
       child: _ProviderChip(
+        key: ValueKey('model-selector-provider-tab-$key'),
         avatar: ProviderAvatar(providerKey: key, displayName: name, size: 18),
         label: name,
         selected: selected,
@@ -1094,6 +1453,7 @@ class _ModelSelectSheetState extends State<_ModelSelectSheet> {
 
 class _ProviderChip extends StatefulWidget {
   const _ProviderChip({
+    super.key,
     required this.avatar,
     required this.label,
     required this.onTap,
@@ -1133,36 +1493,41 @@ class _ProviderChipState extends State<_ProviderChip> {
     final Color borderColor =
         widget.borderColor ?? cs.outlineVariant.withValues(alpha: 0.25);
     final Color labelColor = cs.onSurface;
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTapDown: (_) => setState(() => _pressed = true),
-      onTapUp: (_) => setState(() => _pressed = false),
-      onTapCancel: () => setState(() => _pressed = false),
-      onTap: widget.onTap,
-      onLongPress: widget.onLongPress,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 140),
-        curve: Curves.easeOutCubic,
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-        decoration: BoxDecoration(
-          color: bg,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: borderColor),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            widget.avatar,
-            const SizedBox(width: 6),
-            Text(
-              widget.label,
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
-                color: labelColor,
+    return Semantics(
+      label: widget.label,
+      button: true,
+      selected: isSelected,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTapDown: (_) => setState(() => _pressed = true),
+        onTapUp: (_) => setState(() => _pressed = false),
+        onTapCancel: () => setState(() => _pressed = false),
+        onTap: widget.onTap,
+        onLongPress: widget.onLongPress,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 140),
+          curve: Curves.easeOutCubic,
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+          decoration: BoxDecoration(
+            color: bg,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: borderColor),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              widget.avatar,
+              const SizedBox(width: 6),
+              Text(
+                widget.label,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: AppFontWeights.medium,
+                  color: labelColor,
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -1209,7 +1574,9 @@ abstract class _ListRow {}
 
 class _HeaderRow extends _ListRow {
   final String title;
-  _HeaderRow(this.title);
+  final String? providerKey;
+  final bool isFavorites;
+  _HeaderRow(this.title, {this.providerKey, this.isFavorites = false});
 }
 
 class _ModelRow extends _ListRow {
@@ -1257,7 +1624,7 @@ class _BrandAvatar extends StatelessWidget {
         name.isNotEmpty ? name.characters.first.toUpperCase() : '?',
         style: TextStyle(
           color: cs.primary,
-          fontWeight: FontWeight.w700,
+          fontWeight: AppFontWeights.emphasis,
           fontSize: size * 0.42,
         ),
       );
@@ -1280,14 +1647,19 @@ class _BrandAvatar extends StatelessWidget {
 Future<ModelSelection?> _showDesktopModelSelector(
   BuildContext context, {
   String? limitProviderKey,
+  String? initialProviderKey,
+  String? initialModelId,
 }) async {
   return showGeneralDialog<ModelSelection>(
     context: context,
     barrierDismissible: true,
     barrierLabel: 'model-select-desktop',
     barrierColor: Colors.black.withValues(alpha: 0.25),
-    pageBuilder: (ctx, _, __) =>
-        _DesktopModelSelectDialogBody(limitProviderKey: limitProviderKey),
+    pageBuilder: (ctx, _, __) => _DesktopModelSelectDialogBody(
+      limitProviderKey: limitProviderKey,
+      initialProviderKey: initialProviderKey,
+      initialModelId: initialModelId,
+    ),
     transitionBuilder: (ctx, anim, _, child) {
       final curved = CurvedAnimation(parent: anim, curve: Curves.easeOutCubic);
       return FadeTransition(
@@ -1302,8 +1674,14 @@ Future<ModelSelection?> _showDesktopModelSelector(
 }
 
 class _DesktopModelSelectDialogBody extends StatefulWidget {
-  const _DesktopModelSelectDialogBody({this.limitProviderKey});
+  const _DesktopModelSelectDialogBody({
+    this.limitProviderKey,
+    this.initialProviderKey,
+    this.initialModelId,
+  });
   final String? limitProviderKey;
+  final String? initialProviderKey;
+  final String? initialModelId;
   @override
   State<_DesktopModelSelectDialogBody> createState() =>
       _DesktopModelSelectDialogBodyState();
@@ -1388,21 +1766,37 @@ class _DesktopModelSelectDialogBodyState
     return out;
   }
 
+  String _currentModelKey(
+    SettingsProvider settings,
+    AssistantProvider assistantProvider,
+  ) {
+    final hasInitial =
+        widget.initialProviderKey != null && widget.initialModelId != null;
+    final provider = hasInitial
+        ? widget.initialProviderKey
+        : assistantProvider.currentAssistant?.chatModelProvider ??
+              settings.currentModelProvider;
+    final modelId = hasInitial
+        ? widget.initialModelId
+        : assistantProvider.currentAssistant?.chatModelId ??
+              settings.currentModelId;
+    return (provider != null && modelId != null) ? '$provider::$modelId' : '';
+  }
+
   Future<void> _loadModels() async {
     final settings = context.read<SettingsProvider>();
-    final assistant = context.read<AssistantProvider>().currentAssistant;
-    final currentProvider =
-        assistant?.chatModelProvider ?? settings.currentModelProvider;
-    final currentModelId = assistant?.chatModelId ?? settings.currentModelId;
-    final currentKey = (currentProvider != null && currentModelId != null)
-        ? '$currentProvider::$currentModelId'
-        : '';
+    final assistantProvider = context.read<AssistantProvider>();
+    final providerConfigs = _buildProviderConfigsPayload(settings);
+    final currentKey = _currentModelKey(settings, assistantProvider);
 
     final data = _ModelProcessingData(
-      providerConfigs: _buildProviderConfigsPayload(settings),
+      providerConfigs: providerConfigs,
       pinnedModels: settings.pinnedModels,
       currentModelKey: currentKey,
-      providersOrder: settings.providersOrder,
+      providersOrder: _buildDisplayProvidersOrder(
+        settings,
+        providerConfigs.keys,
+      ),
       limitProviderKey: widget.limitProviderKey,
       disableResolverPlatformLogging: false,
     );
@@ -1491,7 +1885,12 @@ class _DesktopModelSelectDialogBodyState
         }
         if (favs.isNotEmpty) {
           _headerIndexMap['__fav__'] = _rows.length;
-          _rows.add(_HeaderRow(l10n.modelSelectSheetFavoritesSection));
+          _rows.add(
+            _HeaderRow(
+              l10n.modelSelectSheetFavoritesSection,
+              isFavorites: true,
+            ),
+          );
           for (final m in favs) {
             _favModelIndexMap['${m.providerKey}::${m.id}'] = _rows.length;
             _rows.add(_ModelRow(m, showProviderLabel: true));
@@ -1523,7 +1922,7 @@ class _DesktopModelSelectDialogBodyState
       // When limiting to a single provider, hide the provider header (and its settings button)
       if (widget.limitProviderKey == null) {
         _headerIndexMap[pk] = _rows.length;
-        _rows.add(_HeaderRow(g.name));
+        _rows.add(_HeaderRow(g.name, providerKey: pk));
       }
       for (final m in items) {
         _modelIndexMap['${m.providerKey}::${m.id}'] = _rows.length;
@@ -1675,16 +2074,10 @@ class _DesktopModelSelectDialogBodyState
       itemBuilder: (context, index) {
         final row = _rows[index];
         if (row is _HeaderRow) {
-          final isFav = _headerIndexMap['__fav__'] == index;
-          if (isFav) {
+          if (row.isFavorites) {
             return _favoritesHeader(context, row.title);
           }
-          // Find provider key by matching header index if needed
-          String? providerKey;
-          _headerIndexMap.forEach((k, v) {
-            if (v == index && k != '__fav__') providerKey = k;
-          });
-          return _providerHeader(context, providerKey, row.title);
+          return _providerHeader(context, row.providerKey, row.title);
         } else if (row is _ModelRow) {
           return _desktopModelTile(
             context,
@@ -1707,15 +2100,15 @@ class _DesktopModelSelectDialogBodyState
     }
 
     final settings = context.read<SettingsProvider>();
-    final assistant = context.read<AssistantProvider>().currentAssistant;
-    final pk = assistant?.chatModelProvider ?? settings.currentModelProvider;
-    final mid = assistant?.chatModelId ?? settings.currentModelId;
-    if (pk == null || mid == null) return;
+    final currentKey = _currentModelKey(
+      settings,
+      context.read<AssistantProvider>(),
+    );
+    if (currentKey.isEmpty) return;
 
     // Rebuild to ensure index maps are current
     _rebuildRows();
 
-    final currentKey = '$pk::$mid';
     final bool showFavorites =
         widget.limitProviderKey == null && _searchCtrl.text.isEmpty;
     final bool isPinned = settings.pinnedModels.contains(currentKey);
@@ -1727,6 +2120,10 @@ class _DesktopModelSelectDialogBodyState
     targetIndex ??= _modelIndexMap[currentKey];
     // If provider headers are visible, fall back to its section header
     if (widget.limitProviderKey == null) {
+      final separator = currentKey.indexOf('::');
+      final pk = separator == -1
+          ? currentKey
+          : currentKey.substring(0, separator);
       targetIndex ??= _headerIndexMap[pk];
     }
 
@@ -1788,7 +2185,7 @@ class _DesktopModelSelectDialogBodyState
               child: Text.rich(
                 TextSpan(
                   text: m.info.displayName,
-                  style: const TextStyle(fontSize: 12.5),
+                  style: TextStyle(fontSize: 12.5),
                   children: [
                     if (showProviderLabel)
                       TextSpan(
@@ -1861,7 +2258,7 @@ class _DesktopModelSelectDialogBodyState
             title,
             style: TextStyle(
               fontSize: 11.5,
-              fontWeight: FontWeight.w600,
+              fontWeight: AppFontWeights.semibold,
               color: cs.onSurface.withValues(alpha: 0.6),
             ),
           ),
@@ -1886,11 +2283,22 @@ class _DesktopModelSelectDialogBodyState
             overflow: TextOverflow.ellipsis,
             style: TextStyle(
               fontSize: 11.5,
-              fontWeight: FontWeight.w600,
+              fontWeight: AppFontWeights.semibold,
               color: cs.onSurface.withValues(alpha: 0.6),
             ),
           ),
           const Spacer(),
+          if (providerKey != null)
+            ProviderBalanceBadge(
+              providerKey: providerKey,
+              displayName: displayName,
+              style: TextStyle(
+                fontSize: 11.5,
+                fontWeight: AppFontWeights.emphasis,
+              ),
+              color: cs.primary,
+            ),
+          if (providerKey != null) const SizedBox(width: 8),
           if (providerKey != null)
             Tooltip(
               message: AppLocalizations.of(context)!.settingsPageTitle,

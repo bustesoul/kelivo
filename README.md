@@ -27,7 +27,7 @@ English | [简体中文](README_ZH_CN.md)
 [![Download on the App Store](https://developer.apple.com/assets/elements/badges/download-on-the-app-store.svg)](https://apps.apple.com/us/app/kelivo/id6752122930)
 
 
-🔗 [TestFlight](https://testflight.apple.com/join/PZZyRMyY) for beta testing.
+🔗 [TestFlight](https://testflight.apple.com/join/erbGGykR) for beta testing.
 
 ## ✨ Features
 
@@ -42,7 +42,7 @@ English | [简体中文](README_ZH_CN.md)
 - 🎙️ **Voice/TTS Providers** - Built-in system TTS plus OpenAI / Google Gemini / ElevenLabs voice servers.
 - 🛠️ **MCP Support** - Model Context Protocol tool integration.
 - 🧰 **Built-in MCP Tools** - Includes a built-in MCP Fetch tool.
-- 🔍 **Web Search** - Integrated with multiple search engines (Exa, Tavily, Zhipu, LinkUp, Brave, Bing, Metaso, SearXNG, Ollama, Jina, Perplexity, Bocha).
+- 🔍 **Web Search** - Integrated with multiple search engines (Bing, DuckDuckGo, Exa, Tavily, Zhipu, LinkUp, Brave, Metaso, SearXNG, Ollama, Jina, Perplexity, Bocha, Serper, Grok).
 - 🧩 **Prompt Variables** - Supports dynamic variables like model name, time, etc.
 - 📤 **QR Code Sharing** - Export and import provider configurations via QR codes.
 - 💾 **Data Backup** - Supports chat history backup and restoration.

@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+
 import 'package:flutter/widgets.dart';
 import 'package:provider/provider.dart';
 import '../../../core/models/assistant.dart';
@@ -6,8 +8,12 @@ import '../../../core/providers/assistant_provider.dart';
 import '../../../core/providers/mcp_provider.dart';
 import '../../../core/providers/memory_provider.dart';
 import '../../../core/providers/settings_provider.dart';
+import '../../../core/providers/tts_provider.dart';
+import '../../../core/services/api/chat_api_service.dart';
 import '../../../core/services/mcp/mcp_tool_service.dart';
 import '../../../core/services/search/search_tool_service.dart';
+import 'ask_user_interaction_service.dart';
+import 'local_tools_service.dart';
 import 'tool_approval_service.dart';
 
 /// 工具调用处理服务
@@ -134,6 +140,21 @@ class ToolHandlerService {
     return jsonDecode(jsonEncode(input)) as Map<String, dynamic>;
   }
 
+  static String _toolError({
+    required String error,
+    required String message,
+    required String tool,
+    String? instruction,
+  }) {
+    return jsonEncode({
+      'type': 'tool_error',
+      'error': error,
+      'message': message,
+      'tool': tool,
+      if (instruction != null) 'instruction': instruction,
+    });
+  }
+
   // ============================================================================
   // Tool Definitions Builder
   // ============================================================================
@@ -156,7 +177,9 @@ class ToolHandlerService {
     final supportsTools = isToolModel(providerKey, modelId);
 
     // Search tool (skip when Gemini built-in search is active)
-    if (settings.searchEnabled && !hasBuiltInSearch && supportsTools) {
+    if (assistant?.searchEnabled == true &&
+        !hasBuiltInSearch &&
+        supportsTools) {
       toolDefs.add(SearchToolService.getToolDefinition());
     }
 
@@ -164,6 +187,14 @@ class ToolHandlerService {
     if (assistant?.enableMemory == true && supportsTools) {
       toolDefs.addAll(_buildMemoryToolDefinitions());
     }
+
+    // Local tools
+    toolDefs.addAll(
+      LocalToolsService.buildToolDefinitions(
+        assistant: assistant,
+        supportsTools: supportsTools,
+      ),
+    );
 
     // MCP tools
     final mcpTools = _buildMcpToolDefinitions(
@@ -306,10 +337,11 @@ class ToolHandlerService {
   /// - Search tool calls
   /// - Memory tool calls (create/edit/delete)
   /// - MCP tool calls
-  Future<String> Function(String, Map<String, dynamic>)? buildToolCallHandler(
+  ToolCallHandler? buildToolCallHandler(
     SettingsProvider settings,
     Assistant? assistant, {
     ToolApprovalService? approvalService,
+    AskUserInteractionService? askUserService,
   }) {
     final mcp = contextProvider.read<McpProvider>();
     final toolSvc = contextProvider.read<McpToolService>();
@@ -317,42 +349,114 @@ class ToolHandlerService {
     // use_build_context_synchronously warning
     final assistantProvider = contextProvider.read<AssistantProvider>();
 
-    return (name, args) async {
-      // Search tool
-      if (name == SearchToolService.toolName && settings.searchEnabled) {
-        final q = (args['query'] ?? '').toString();
-        return await SearchToolService.executeSearch(q, settings);
-      }
+    return (name, args, {toolCallId}) async {
+      try {
+        // Search tool
+        if (name == SearchToolService.toolName &&
+            assistant?.searchEnabled == true) {
+          final q = (args['query'] ?? '').toString();
+          return await SearchToolService.executeSearch(q, settings);
+        }
 
-      // Memory tools
-      final memoryResult = await _handleMemoryToolCall(name, args, assistant);
-      if (memoryResult != null) {
-        return memoryResult;
-      }
+        // Memory tools
+        final memoryResult = await _handleMemoryToolCall(name, args, assistant);
+        if (memoryResult != null) {
+          return memoryResult;
+        }
 
-      // Approval gate for MCP tools
-      if (approvalService != null && mcp.toolNeedsApproval(name)) {
-        // Generate a unique id for this tool call approval request
-        final toolCallId = '${name}_${DateTime.now().microsecondsSinceEpoch}';
-        final result = await approvalService.requestApproval(
-          toolCallId: toolCallId,
+        // Local tools
+        final localResult = await LocalToolsService.tryHandleToolCall(
+          name,
+          args,
+          assistant,
+          onSpeakText: (text) async {
+            final tts = contextProvider.read<TtsProvider>();
+            if (!tts.isAvailable) {
+              throw StateError('Text-to-speech is unavailable.');
+            }
+            unawaited(
+              tts.speak(text).catchError((Object error, StackTrace stack) {
+                FlutterError.reportError(
+                  FlutterErrorDetails(
+                    exception: error,
+                    stack: stack,
+                    library: 'Kelivo local tools',
+                    context: ErrorDescription('while playing text-to-speech'),
+                  ),
+                );
+              }),
+            );
+          },
+        );
+        if (localResult != null) {
+          return localResult;
+        }
+
+        if (name == LocalToolNames.askUser &&
+            assistant != null &&
+            assistant.localToolIds.contains(LocalToolNames.askUser)) {
+          if (askUserService == null) {
+            return _toolError(
+              error: 'ask_user_unavailable',
+              message: 'Ask user interaction service is unavailable.',
+              tool: name,
+            );
+          }
+          try {
+            final result = await askUserService.requestAnswer(
+              toolCallId: (toolCallId?.trim().isNotEmpty == true)
+                  ? toolCallId!.trim()
+                  : '${name}_${DateTime.now().microsecondsSinceEpoch}',
+              arguments: args,
+            );
+            return result.toJsonString();
+          } on AskUserInvalidRequestException catch (e) {
+            return _toolError(
+              error: 'invalid_ask_user_request',
+              message: e.message,
+              tool: name,
+            );
+          }
+        }
+
+        // Approval gate for MCP tools
+        if (approvalService != null && mcp.toolNeedsApproval(name)) {
+          // Generate a unique id for this tool call approval request
+          final toolCallId = '${name}_${DateTime.now().microsecondsSinceEpoch}';
+          final result = await approvalService.requestApproval(
+            toolCallId: toolCallId,
+            toolName: name,
+            arguments: args,
+          );
+          if (!result.approved) {
+            return _toolError(
+              error: 'approval_denied',
+              message: result.denyReason ?? 'User denied the tool call',
+              tool: name,
+            );
+          }
+        }
+
+        // MCP tools
+        final text = await toolSvc.callToolTextForAssistant(
+          mcp,
+          assistantProvider,
+          assistantId: assistant?.id,
           toolName: name,
           arguments: args,
         );
-        if (!result.approved) {
-          return 'Tool call "$name" denied. Reason: ${result.denyReason ?? "User denied"}';
-        }
+        return text;
+      } catch (e) {
+        // Catch unexpected exceptions and return error JSON to LLM
+        // This prevents tool failures from terminating the chat flow
+        return _toolError(
+          error: 'execution_error',
+          message: e.toString(),
+          tool: name,
+          instruction:
+              'The tool execution failed unexpectedly. You may try again with different parameters or inform the user about the issue.',
+        );
       }
-
-      // MCP tools
-      final text = await toolSvc.callToolTextForAssistant(
-        mcp,
-        assistantProvider,
-        assistantId: assistant?.id,
-        toolName: name,
-        arguments: args,
-      );
-      return text;
     };
   }
 
@@ -365,29 +469,83 @@ class ToolHandlerService {
     Assistant? assistant,
   ) async {
     if (assistant?.enableMemory != true) return null;
+    if (name != 'create_memory' &&
+        name != 'edit_memory' &&
+        name != 'delete_memory') {
+      return null;
+    }
 
     try {
       final mp = contextProvider.read<MemoryProvider>();
 
       if (name == 'create_memory') {
         final content = (args['content'] ?? '').toString();
-        if (content.isEmpty) return '';
+        if (content.isEmpty) {
+          return _toolError(
+            error: 'invalid_memory_content',
+            message: 'Memory content must not be empty.',
+            tool: name,
+          );
+        }
         final m = await mp.add(assistantId: assistant!.id, content: content);
         return m.content;
       } else if (name == 'edit_memory') {
         final id = (args['id'] as num?)?.toInt() ?? -1;
         final content = (args['content'] ?? '').toString();
-        if (id <= 0 || content.isEmpty) return '';
+        if (id <= 0) {
+          return _toolError(
+            error: 'invalid_memory_id',
+            message: 'Memory id must be a positive integer.',
+            tool: name,
+          );
+        }
+        if (content.isEmpty) {
+          return _toolError(
+            error: 'invalid_memory_content',
+            message: 'Memory content must not be empty.',
+            tool: name,
+          );
+        }
         final m = await mp.update(id: id, content: content);
-        return m?.content ?? '';
+        if (m == null) {
+          return _toolError(
+            error: 'memory_not_found',
+            message: 'No memory record was found for id $id.',
+            tool: name,
+            instruction:
+                'Use the available memory records shown in context, or create a new memory instead of editing a missing one.',
+          );
+        }
+        return m.content;
       } else if (name == 'delete_memory') {
         final id = (args['id'] as num?)?.toInt() ?? -1;
-        if (id <= 0) return '';
+        if (id <= 0) {
+          return _toolError(
+            error: 'invalid_memory_id',
+            message: 'Memory id must be a positive integer.',
+            tool: name,
+          );
+        }
         final ok = await mp.delete(id: id);
-        return ok ? 'deleted' : '';
+        if (!ok) {
+          return _toolError(
+            error: 'memory_not_found',
+            message: 'No memory record was found for id $id.',
+            tool: name,
+            instruction:
+                'Use the available memory records shown in context, or skip deleting a missing memory.',
+          );
+        }
+        return 'deleted';
       }
-    } catch (_) {
-      // Ignore memory operation errors
+    } catch (e) {
+      return _toolError(
+        error: 'memory_execution_error',
+        message: e.toString(),
+        tool: name,
+        instruction:
+            'The memory tool failed. Retry only after correcting the parameters, or inform the user about the issue.',
+      );
     }
 
     return null;

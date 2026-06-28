@@ -17,6 +17,7 @@ import '../../../utils/markdown_media_sanitizer.dart';
 import '../../../shared/pages/webview_page.dart';
 import '../../../desktop/html_preview_dialog.dart';
 import 'dart:convert';
+import 'package:Kelivo/theme/app_font_weights.dart';
 
 enum MessageMoreAction {
   edit,
@@ -24,6 +25,7 @@ enum MessageMoreAction {
   deleteCurrentVersion,
   deleteAllVersions,
   share,
+  selectMessages,
 }
 
 Future<MessageMoreAction?> showMessageMoreSheet(
@@ -115,6 +117,13 @@ Future<MessageMoreAction?> showMessageMoreSheet(
         },
       ),
       DesktopContextMenuItem(
+        icon: Lucide.CheckSquare,
+        label: l10n.messageMoreSheetSelectMessages,
+        onTap: () {
+          selected = MessageMoreAction.selectMessages;
+        },
+      ),
+      DesktopContextMenuItem(
         icon: Lucide.GitFork,
         label: l10n.messageMoreSheetCreateBranch,
         onTap: () {
@@ -198,7 +207,7 @@ class _MessageMoreSheetState extends State<_MessageMoreSheet> {
                   label,
                   style: TextStyle(
                     fontSize: 15,
-                    fontWeight: FontWeight.w500,
+                    fontWeight: AppFontWeights.medium,
                     color: fg,
                   ),
                 ),
@@ -312,6 +321,15 @@ class _MessageMoreSheetState extends State<_MessageMoreSheet> {
                       label: l10n.messageMoreSheetShare,
                       onTap: () {
                         Navigator.of(context).pop(MessageMoreAction.share);
+                      },
+                    ),
+                    _actionItem(
+                      icon: Lucide.CheckSquare,
+                      label: l10n.messageMoreSheetSelectMessages,
+                      onTap: () {
+                        Navigator.of(
+                          context,
+                        ).pop(MessageMoreAction.selectMessages);
                       },
                     ),
                     _actionItem(

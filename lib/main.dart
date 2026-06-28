@@ -30,13 +30,15 @@ import 'core/providers/world_book_provider.dart';
 import 'core/providers/memory_provider.dart';
 import 'core/providers/backup_provider.dart';
 import 'core/providers/s3_backup_provider.dart';
+import 'core/providers/backup_reminder_provider.dart';
 import 'core/providers/hotkey_provider.dart';
 import 'core/services/chat/chat_service.dart';
 import 'core/services/mcp/mcp_tool_service.dart';
 import 'core/services/logging/flutter_logger.dart';
+import 'features/home/services/ask_user_interaction_service.dart';
 import 'features/home/services/tool_approval_service.dart';
 import 'utils/sandbox_path_resolver.dart';
-import 'shared/widgets/snackbar.dart';
+import 'shared/widgets/app_overlays.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:system_fonts/system_fonts.dart';
 import 'dart:io'
@@ -116,12 +118,22 @@ class MyApp extends StatelessWidget {
       providers: [
         ChangeNotifierProvider(create: (_) => ChatProvider()),
         ChangeNotifierProvider(create: (_) => UserProvider()),
-        ChangeNotifierProvider(create: (_) => SettingsProvider()),
+        ChangeNotifierProvider(
+          create: (_) {
+            final settings = SettingsProvider();
+            unawaited(settings.incrementAppLaunchCount());
+            return settings;
+          },
+        ),
         ChangeNotifierProvider(create: (_) => ChatService()),
         ChangeNotifierProvider(create: (_) => McpToolService()),
         ChangeNotifierProvider(create: (_) => McpProvider()),
         ChangeNotifierProvider(create: (_) => ToolApprovalService()),
-        ChangeNotifierProvider(create: (_) => AssistantProvider()),
+        ChangeNotifierProvider(create: (_) => AskUserInteractionService()),
+        ChangeNotifierProvider(
+          create: (ctx) =>
+              AssistantProvider(chatService: ctx.read<ChatService>()),
+        ),
         ChangeNotifierProvider(create: (_) => TagProvider()),
         ChangeNotifierProvider(create: (_) => TtsProvider()),
         ChangeNotifierProvider(create: (_) => UpdateProvider()),
@@ -132,6 +144,7 @@ class MyApp extends StatelessWidget {
         ),
         ChangeNotifierProvider(create: (_) => WorldBookProvider()),
         ChangeNotifierProvider(create: (_) => MemoryProvider()),
+        ChangeNotifierProvider(create: (_) => BackupReminderProvider()),
         // Desktop hotkeys provider
         ChangeNotifierProvider(create: (_) => HotkeyProvider()),
         ChangeNotifierProvider(
@@ -419,17 +432,16 @@ class MyApp extends StatelessWidget {
                   }
 
                   // Enforce app font as a default across the tree for Texts without explicit family
+                  final appWithOverlays = AppOverlays(
+                    child: child ?? const SizedBox.shrink(),
+                  );
                   return AnnotatedRegion<SystemUiOverlayStyle>(
                     value: overlay,
                     child: effectiveAppFont == null
-                        ? AppSnackBarOverlay(
-                            child: child ?? const SizedBox.shrink(),
-                          )
+                        ? appWithOverlays
                         : DefaultTextStyle.merge(
                             style: TextStyle(fontFamily: effectiveAppFont),
-                            child: AppSnackBarOverlay(
-                              child: child ?? const SizedBox.shrink(),
-                            ),
+                            child: appWithOverlays,
                           ),
                   );
                 },

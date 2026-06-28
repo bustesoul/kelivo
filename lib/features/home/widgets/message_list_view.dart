@@ -1,4 +1,9 @@
+import 'dart:async';
+
+import 'package:flutter/gestures.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:provider/provider.dart';
 import 'package:scrollview_observer/scrollview_observer.dart';
 
@@ -11,6 +16,7 @@ import '../../chat/widgets/chat_message_widget.dart';
 import '../../chat/widgets/message_more_sheet.dart';
 import '../controllers/stream_controller.dart' as stream_ctrl;
 import '../controllers/streaming_content_notifier.dart';
+import '../services/ask_user_interaction_service.dart';
 import '../utils/chat_layout_constants.dart';
 import 'model_icon.dart';
 
@@ -33,7 +39,16 @@ typedef OnDeleteAllVersions =
 typedef OnForkConversation = Future<void> Function(ChatMessage message);
 typedef OnShareMessage =
     void Function(int messageIndex, List<ChatMessage> messages);
+typedef OnSelectMessages =
+    void Function(int messageIndex, List<ChatMessage> messages);
 typedef OnSpeakMessage = Future<void> Function(ChatMessage message);
+typedef OnSuggestionTap = void Function(String suggestion);
+typedef OnRecoveredAskUserAnswer =
+    Future<void> Function(
+      ChatMessage message,
+      ToolUIPart part,
+      AskUserResult result,
+    );
 
 /// Data class for reasoning UI state
 class ReasoningUiState {
@@ -67,7 +82,7 @@ class TranslationUiState {
 /// Accepts pre-collapsed messages and pre-computed byGroup from the controller
 /// to avoid redundant computation on every build. Wraps the ListView with
 /// ListViewObserver for precise index-based scroll navigation.
-class MessageListView extends StatelessWidget {
+class MessageListView extends StatefulWidget {
   const MessageListView({
     super.key,
     required this.scrollController,
@@ -84,6 +99,8 @@ class MessageListView extends StatelessWidget {
     required this.selecting,
     required this.selectedItems,
     required this.dividerPadding,
+    this.topContentPadding = 8,
+    this.bottomContentPadding = 16,
     this.pinnedStreamingMessageId,
     this.isPinnedIndicatorActive = false,
     required this.isProcessingFiles,
@@ -99,12 +116,20 @@ class MessageListView extends StatelessWidget {
     this.onDeleteAllVersions,
     this.onForkConversation,
     this.onShareMessage,
+    this.onSelectMessages,
     this.onSpeakMessage,
+    this.suggestions = const <String>[],
+    this.onSuggestionTap,
+    this.onRecoveredAskUserAnswer,
     this.onToggleSelection,
     this.onToggleReasoning,
     this.onToggleTranslation,
     this.onToggleReasoningSegment,
     this.buildPinnedStreamingIndicator,
+    this.hasMoreBefore = false,
+    this.onLoadMoreBefore,
+    this.hasMoreAfter = false,
+    this.onLoadMoreAfter,
   });
 
   final ScrollController scrollController;
@@ -130,6 +155,8 @@ class MessageListView extends StatelessWidget {
   final bool selecting;
   final Set<String> selectedItems;
   final EdgeInsetsGeometry dividerPadding;
+  final double topContentPadding;
+  final double bottomContentPadding;
   final String? pinnedStreamingMessageId;
   final bool isPinnedIndicatorActive;
   final ValueNotifier<bool> isProcessingFiles;
@@ -156,13 +183,55 @@ class MessageListView extends StatelessWidget {
   final OnDeleteAllVersions? onDeleteAllVersions;
   final OnForkConversation? onForkConversation;
   final OnShareMessage? onShareMessage;
+  final OnSelectMessages? onSelectMessages;
   final OnSpeakMessage? onSpeakMessage;
+  final List<String> suggestions;
+  final OnSuggestionTap? onSuggestionTap;
+  final OnRecoveredAskUserAnswer? onRecoveredAskUserAnswer;
   final void Function(String messageId, bool selected)? onToggleSelection;
   final void Function(String messageId)? onToggleReasoning;
   final void Function(String messageId)? onToggleTranslation;
   final void Function(String messageId, int segmentIndex)?
   onToggleReasoningSegment;
   final Widget Function()? buildPinnedStreamingIndicator;
+  final bool hasMoreBefore;
+  final bool Function()? onLoadMoreBefore;
+  final bool hasMoreAfter;
+  final bool Function()? onLoadMoreAfter;
+
+  @override
+  State<MessageListView> createState() => _MessageListViewState();
+}
+
+class _MessageListViewState extends State<MessageListView> {
+  static const double _streamingUpdateDeferBottomTolerance = 24.0;
+
+  bool _historyLoadScheduled = false;
+  final ValueNotifier<bool> _deferStreamingMessageUpdates = ValueNotifier<bool>(
+    false,
+  );
+  DateTime? _lastHistoryLoadAt;
+  Timer? _scrollIdleTimer;
+  bool _pointerScrollActivityCheckScheduled = false;
+
+  bool get _isDesktopPlatform =>
+      defaultTargetPlatform == TargetPlatform.macOS ||
+      defaultTargetPlatform == TargetPlatform.windows ||
+      defaultTargetPlatform == TargetPlatform.linux;
+
+  ScrollViewKeyboardDismissBehavior get _keyboardDismissBehavior {
+    if (_isDesktopPlatform) {
+      return ScrollViewKeyboardDismissBehavior.manual;
+    }
+    return ScrollViewKeyboardDismissBehavior.onDrag;
+  }
+
+  @override
+  void dispose() {
+    _scrollIdleTimer?.cancel();
+    _deferStreamingMessageUpdates.dispose();
+    super.dispose();
+  }
 
   /// Build the context divider widget shown at truncate position.
   Widget _buildContextDivider(BuildContext context) {
@@ -208,20 +277,21 @@ class MessageListView extends StatelessWidget {
                 .clamp(0.0, double.infinity);
 
         return ValueListenableBuilder<bool>(
-          valueListenable: isProcessingFiles,
+          valueListenable: widget.isProcessingFiles,
           builder: (context, isProcessing, child) {
             final list = ListView.builder(
-              controller: scrollController,
+              controller: widget.scrollController,
               padding: EdgeInsets.fromLTRB(
                 horizontalPad,
-                8,
+                widget.topContentPadding,
                 horizontalPad,
-                isPinnedIndicatorActive ? 28 : 16,
+                widget.bottomContentPadding +
+                    (widget.isPinnedIndicatorActive ? 12 : 0),
               ),
-              itemCount: messages.length,
-              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+              itemCount: widget.messages.length,
+              keyboardDismissBehavior: _keyboardDismissBehavior,
               itemBuilder: (context, index) {
-                if (index < 0 || index >= messages.length) {
+                if (index < 0 || index >= widget.messages.length) {
                   return const SizedBox.shrink();
                 }
                 return _buildMessageItem(
@@ -233,16 +303,30 @@ class MessageListView extends StatelessWidget {
             );
 
             final observedList = ListViewObserver(
-              controller: observerController,
+              controller: widget.observerController,
               child: list,
+            );
+
+            final historyList = NotificationListener<ScrollNotification>(
+              onNotification: _handleScrollNotification,
+              child: observedList,
+            );
+
+            final userScrollAwareList = Listener(
+              onPointerSignal: (event) {
+                if (event is PointerScrollEvent) {
+                  _schedulePointerScrollActivityCheck();
+                }
+              },
+              child: historyList,
             );
 
             return Stack(
               children: [
-                observedList,
-                if (isPinnedIndicatorActive &&
-                    buildPinnedStreamingIndicator != null)
-                  buildPinnedStreamingIndicator!(),
+                userScrollAwareList,
+                if (widget.isPinnedIndicatorActive &&
+                    widget.buildPinnedStreamingIndicator != null)
+                  widget.buildPinnedStreamingIndicator!(),
               ],
             );
           },
@@ -251,35 +335,192 @@ class MessageListView extends StatelessWidget {
     );
   }
 
+  bool _handleScrollNotification(ScrollNotification notification) {
+    if (notification.depth != 0) return false;
+    if (notification.metrics.axis != Axis.vertical) return false;
+    if (notification is ScrollUpdateNotification) {
+      if (notification.dragDetails != null) {
+        _handleUserScrollActivity(notification.metrics);
+      }
+      if (_deferStreamingMessageUpdates.value) {
+        _scheduleStreamingUpdateResume();
+      }
+    } else if (notification is OverscrollNotification) {
+      if (notification.dragDetails != null) {
+        _handleUserScrollActivity(notification.metrics);
+      }
+      if (_deferStreamingMessageUpdates.value) {
+        _scheduleStreamingUpdateResume();
+      }
+    } else if (notification is ScrollStartNotification &&
+        notification.dragDetails != null) {
+      _handleUserScrollActivity(notification.metrics);
+    }
+    if (notification is UserScrollNotification) {
+      final shouldDefer = notification.direction != ScrollDirection.idle;
+      if (shouldDefer) {
+        _handleUserScrollActivity(notification.metrics);
+      } else {
+        _scheduleStreamingUpdateResume();
+      }
+    }
+    if (notification is ScrollEndNotification) {
+      _scheduleStreamingUpdateResume();
+    }
+    if (_historyLoadScheduled) return false;
+    final now = DateTime.now();
+    final last = _lastHistoryLoadAt;
+    if (last != null &&
+        now.difference(last) < const Duration(milliseconds: 120)) {
+      return false;
+    }
+
+    final isNearTop = notification.metrics.pixels <= 96;
+    final isNearBottom =
+        notification.metrics.maxScrollExtent - notification.metrics.pixels <=
+        96;
+    if (isNearTop && widget.hasMoreBefore && widget.onLoadMoreBefore != null) {
+      _scheduleHistoryLoad(
+        keepAnchorFromTop: true,
+        beforeExtent: notification.metrics.maxScrollExtent,
+        load: widget.onLoadMoreBefore!,
+      );
+    } else if (isNearBottom &&
+        widget.hasMoreAfter &&
+        widget.onLoadMoreAfter != null) {
+      _scheduleHistoryLoad(
+        keepAnchorFromTop: false,
+        beforeExtent: notification.metrics.maxScrollExtent,
+        load: widget.onLoadMoreAfter!,
+      );
+    }
+    return false;
+  }
+
+  void _schedulePointerScrollActivityCheck() {
+    if (_pointerScrollActivityCheckScheduled) return;
+    _pointerScrollActivityCheckScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _pointerScrollActivityCheckScheduled = false;
+      if (!mounted) return;
+      _handleUserScrollActivity();
+    });
+  }
+
+  void _handleUserScrollActivity([ScrollMetrics? metrics]) {
+    if (_isWithinStreamingAutoFollowBand(metrics)) {
+      _resumeStreamingMessageUpdates();
+      return;
+    }
+    _setDeferStreamingMessageUpdates(true);
+    _scheduleStreamingUpdateResume();
+  }
+
+  bool _isWithinStreamingAutoFollowBand([ScrollMetrics? metrics]) {
+    if (metrics != null) {
+      return metrics.maxScrollExtent - metrics.pixels <=
+          _streamingUpdateDeferBottomTolerance;
+    }
+    if (!widget.scrollController.hasClients) return true;
+    final position = widget.scrollController.position;
+    return position.maxScrollExtent - position.pixels <=
+        _streamingUpdateDeferBottomTolerance;
+  }
+
+  void _setDeferStreamingMessageUpdates(bool value) {
+    if (_deferStreamingMessageUpdates.value == value) return;
+    _deferStreamingMessageUpdates.value = value;
+  }
+
+  void _scheduleStreamingUpdateResume() {
+    _scrollIdleTimer?.cancel();
+    _scrollIdleTimer = Timer(
+      const Duration(milliseconds: 160),
+      _resumeStreamingMessageUpdates,
+    );
+  }
+
+  void _resumeStreamingMessageUpdates() {
+    _scrollIdleTimer?.cancel();
+    _scrollIdleTimer = null;
+    if (!mounted || !_deferStreamingMessageUpdates.value) return;
+    _deferStreamingMessageUpdates.value = false;
+  }
+
+  void _scheduleHistoryLoad({
+    required bool keepAnchorFromTop,
+    required double beforeExtent,
+    required bool Function() load,
+  }) {
+    _historyLoadScheduled = true;
+    _lastHistoryLoadAt = DateTime.now();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        _historyLoadScheduled = false;
+        return;
+      }
+
+      final loaded = load();
+      if (!loaded) {
+        _historyLoadScheduled = false;
+        return;
+      }
+
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _historyLoadScheduled = false;
+        if (!mounted || !widget.scrollController.hasClients) return;
+        if (!keepAnchorFromTop) return;
+        final after = widget.scrollController.position.maxScrollExtent;
+        final delta = after - beforeExtent;
+        if (delta <= 0) return;
+        final target = (widget.scrollController.offset + delta).clamp(
+          widget.scrollController.position.minScrollExtent,
+          widget.scrollController.position.maxScrollExtent,
+        );
+        widget.scrollController.jumpTo(target);
+      });
+    });
+  }
+
   Widget _buildMessageItem(
     BuildContext context, {
     required int index,
     required bool isProcessingFiles,
   }) {
-    final message = messages[index];
-    final r = reasoning[message.id];
-    final t = translations[message.id];
+    final message = widget.messages[index];
+    final r = widget.reasoning[message.id];
+    final t = widget.translations[message.id];
     final chatScale = context.watch<SettingsProvider>().chatFontScale;
     final assistant = context.watch<AssistantProvider>().currentAssistant;
     final useAssistAvatar = assistant?.useAssistantAvatar == true;
     final useAssistName = assistant?.useAssistantName == true;
     final showDivider =
-        truncCollapsedIndex >= 0 && index == truncCollapsedIndex;
+        widget.truncCollapsedIndex >= 0 && index == widget.truncCollapsedIndex;
     final gid = (message.groupId ?? message.id);
-    final vers = (byGroup[gid] ?? const <ChatMessage>[]).toList()
+    final vers = (widget.byGroup[gid] ?? const <ChatMessage>[]).toList()
       ..sort((a, b) => a.version.compareTo(b.version));
     int selectedIdx =
-        versionSelections[gid] ?? (vers.isNotEmpty ? vers.length - 1 : 0);
+        widget.versionSelections[gid] ??
+        (vers.isNotEmpty ? vers.length - 1 : 0);
     final total = vers.length;
     if (selectedIdx < 0) selectedIdx = 0;
     if (total > 0 && selectedIdx > total - 1) selectedIdx = total - 1;
+    final latestAssistantIndex = _latestAssistantMessageIndex();
+    final messageSuggestions =
+        !widget.selecting &&
+            index == latestAssistantIndex &&
+            message.role == 'assistant' &&
+            !message.isStreaming &&
+            widget.onSuggestionTap != null
+        ? widget.suggestions
+        : const <String>[];
 
     // Check if this is a streaming message that should use ValueListenableBuilder
     final isStreaming =
         message.isStreaming &&
         message.role == 'assistant' &&
-        streamingContentNotifier != null &&
-        streamingContentNotifier!.hasNotifier(message.id);
+        widget.streamingContentNotifier != null &&
+        widget.streamingContentNotifier!.hasNotifier(message.id);
 
     final messageColumn = Column(
       key: ValueKey(message.id),
@@ -288,16 +529,16 @@ class MessageListView extends StatelessWidget {
         Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (selecting &&
+            if (widget.selecting &&
                 (message.role == 'user' || message.role == 'assistant'))
               Padding(
                 padding: const EdgeInsets.only(left: 10, right: 6),
                 child: IosCheckbox(
-                  value: selectedItems.contains(message.id),
+                  value: widget.selectedItems.contains(message.id),
                   size: 20,
                   hitTestSize: 28,
                   onChanged: (v) {
-                    onToggleSelection?.call(message.id, v);
+                    widget.onToggleSelection?.call(message.id, v);
                   },
                 ),
               ),
@@ -329,6 +570,7 @@ class MessageListView extends StatelessWidget {
                               selectedIdx: selectedIdx,
                               total: total,
                               isProcessingFiles: isProcessingFiles,
+                              suggestions: messageSuggestions,
                             )
                           : _buildChatMessageWidget(
                               context,
@@ -343,6 +585,7 @@ class MessageListView extends StatelessWidget {
                               selectedIdx: selectedIdx,
                               total: total,
                               isProcessingFiles: isProcessingFiles,
+                              suggestions: messageSuggestions,
                             ),
                     );
                   },
@@ -350,12 +593,12 @@ class MessageListView extends StatelessWidget {
 
                 final canSelect =
                     (message.role == 'user' || message.role == 'assistant');
-                if (selecting && canSelect) {
-                  final isSelected = selectedItems.contains(message.id);
+                if (widget.selecting && canSelect) {
+                  final isSelected = widget.selectedItems.contains(message.id);
                   content = GestureDetector(
                     behavior: HitTestBehavior.opaque,
                     onTap: () =>
-                        onToggleSelection?.call(message.id, !isSelected),
+                        widget.onToggleSelection?.call(message.id, !isSelected),
                     child: IgnorePointer(ignoring: true, child: content),
                   );
                 }
@@ -367,18 +610,19 @@ class MessageListView extends StatelessWidget {
         ),
         if (showDivider)
           Padding(
-            padding: dividerPadding,
+            padding: widget.dividerPadding,
             child: _buildContextDivider(context),
           ),
       ],
     );
 
     final isSpotlight =
-        spotlightMessageId != null && message.id == spotlightMessageId;
+        widget.spotlightMessageId != null &&
+        message.id == widget.spotlightMessageId;
     if (!isSpotlight) return messageColumn;
 
     return TweenAnimationBuilder<double>(
-      key: ValueKey('spotlight-$spotlightToken'),
+      key: ValueKey('spotlight-${widget.spotlightToken}'),
       tween: Tween<double>(begin: 1.0, end: 0.0),
       duration: const Duration(milliseconds: 1200),
       curve: Curves.easeOut,
@@ -406,6 +650,14 @@ class MessageListView extends StatelessWidget {
     );
   }
 
+  int _latestAssistantMessageIndex() {
+    for (var i = widget.messages.length - 1; i >= 0; i--) {
+      final message = widget.messages[i];
+      if (message.role == 'assistant' && !message.isStreaming) return i;
+    }
+    return -1;
+  }
+
   /// Build a streaming message widget that uses ValueListenableBuilder
   /// to avoid full page rebuilds during streaming.
   Widget _buildStreamingMessageWidget(
@@ -421,10 +673,12 @@ class MessageListView extends StatelessWidget {
     required int selectedIdx,
     required int total,
     required bool isProcessingFiles,
+    required List<String> suggestions,
   }) {
-    return ValueListenableBuilder<StreamingContentData>(
-      valueListenable: streamingContentNotifier!.getNotifier(message.id),
-      builder: (context, data, child) {
+    return _StreamingMessageDataGate(
+      notifier: widget.streamingContentNotifier!.getNotifier(message.id),
+      deferUpdates: _deferStreamingMessageUpdates,
+      builder: (context, data, deferUpdates) {
         // Use streaming content if available, otherwise fall back to message content
         final displayContent = data.content.isNotEmpty
             ? data.content
@@ -447,20 +701,11 @@ class MessageListView extends StatelessWidget {
         // This allows user to toggle expanded state during streaming without it being reset
         stream_ctrl.ReasoningData? streamingReasoning = r;
         if (data.reasoningText != null && data.reasoningText!.isNotEmpty) {
-          if (r != null) {
-            r.text = data.reasoningText!;
-            r.startAt = data.reasoningStartAt;
-            if (data.reasoningFinishedAt != null) {
-              r.finishedAt = data.reasoningFinishedAt;
-            }
-            streamingReasoning = r;
-          } else {
-            streamingReasoning = stream_ctrl.ReasoningData()
-              ..text = data.reasoningText!
-              ..startAt = data.reasoningStartAt
-              ..finishedAt = data.reasoningFinishedAt
-              ..expanded = false;
-          }
+          streamingReasoning = stream_ctrl.ReasoningData()
+            ..text = data.reasoningText!
+            ..startAt = data.reasoningStartAt ?? r?.startAt
+            ..finishedAt = data.reasoningFinishedAt ?? r?.finishedAt
+            ..expanded = r?.expanded ?? false;
         }
 
         // Wrap in RepaintBoundary to isolate repaints from affecting other widgets
@@ -478,6 +723,8 @@ class MessageListView extends StatelessWidget {
             selectedIdx: selectedIdx,
             total: total,
             isProcessingFiles: isProcessingFiles,
+            suggestions: suggestions,
+            enableStreamingTextMotion: !deferUpdates,
           ),
         );
       },
@@ -498,16 +745,19 @@ class MessageListView extends StatelessWidget {
     required int selectedIdx,
     required int total,
     required bool isProcessingFiles,
+    required List<String> suggestions,
+    bool enableStreamingTextMotion = true,
   }) {
     return ChatMessageWidget(
       message: message,
+      enableStreamingTextMotion: enableStreamingTextMotion,
       versionIndex: selectedIdx,
       versionCount: total > 0 ? total : 1,
       onPrevVersion: (selectedIdx > 0)
-          ? () => onVersionChange?.call(gid, selectedIdx - 1)
+          ? () => widget.onVersionChange?.call(gid, selectedIdx - 1)
           : null,
       onNextVersion: (selectedIdx < total - 1)
-          ? () => onVersionChange?.call(gid, selectedIdx + 1)
+          ? () => widget.onVersionChange?.call(gid, selectedIdx + 1)
           : null,
       modelIcon:
           (!useAssistAvatar &&
@@ -533,7 +783,8 @@ class MessageListView extends StatelessWidget {
       showTokenStats: context.watch<SettingsProvider>().showTokenStats,
       hideStreamingIndicator:
           isProcessingFiles ||
-          (isPinnedIndicatorActive && (message.id == pinnedStreamingMessageId)),
+          (widget.isPinnedIndicatorActive &&
+              (message.id == widget.pinnedStreamingMessageId)),
       reasoningText: (message.role == 'assistant') ? (r?.text ?? '') : null,
       reasoningExpanded: (message.role == 'assistant')
           ? (r?.expanded ?? false)
@@ -546,32 +797,32 @@ class MessageListView extends StatelessWidget {
       reasoningStartAt: (message.role == 'assistant') ? r?.startAt : null,
       reasoningFinishedAt: (message.role == 'assistant') ? r?.finishedAt : null,
       onToggleReasoning: (message.role == 'assistant' && r != null)
-          ? () => onToggleReasoning?.call(message.id)
+          ? () => widget.onToggleReasoning?.call(message.id)
           : null,
       translationExpanded: t?.expanded ?? true,
       onToggleTranslation:
           (message.translation != null &&
               message.translation!.isNotEmpty &&
               t != null)
-          ? () => onToggleTranslation?.call(message.id)
+          ? () => widget.onToggleTranslation?.call(message.id)
           : null,
       onRegenerate: message.role == 'assistant'
-          ? () => onRegenerateMessage?.call(message)
+          ? () => widget.onRegenerateMessage?.call(message)
           : null,
       onResend: message.role == 'user'
-          ? () => onResendMessage?.call(message)
+          ? () => widget.onResendMessage?.call(message)
           : null,
       onTranslate: message.role == 'assistant'
-          ? () => onTranslateMessage?.call(message)
+          ? () => widget.onTranslateMessage?.call(message)
           : null,
       onSpeak: message.role == 'assistant'
-          ? () => onSpeakMessage?.call(message)
+          ? () => widget.onSpeakMessage?.call(message)
           : null,
-      onEdit: (message.role == 'user' || message.role == 'assistant')
-          ? () => onEditMessage?.call(message)
+      onEdit: (message.role == 'assistant' || message.role == 'user')
+          ? () => widget.onEditMessage?.call(message)
           : null,
       onDelete: message.role == 'user'
-          ? () => onDeleteMessage?.call(message, byGroup)
+          ? () => widget.onDeleteMessage?.call(message, widget.byGroup)
           : null,
       onMore: () async {
         final action = await showMessageMoreSheet(
@@ -580,30 +831,34 @@ class MessageListView extends StatelessWidget {
           canDeleteAllVersions: total > 1,
         );
         if (action == MessageMoreAction.deleteCurrentVersion) {
-          await onDeleteMessage?.call(message, byGroup);
+          await widget.onDeleteMessage?.call(message, widget.byGroup);
         } else if (action == MessageMoreAction.deleteAllVersions) {
-          await onDeleteAllVersions?.call(message, byGroup);
+          await widget.onDeleteAllVersions?.call(message, widget.byGroup);
         } else if (action == MessageMoreAction.edit) {
-          onEditMessage?.call(message);
+          widget.onEditMessage?.call(message);
         } else if (action == MessageMoreAction.fork) {
-          await onForkConversation?.call(message);
+          await widget.onForkConversation?.call(message);
         } else if (action == MessageMoreAction.share) {
-          onShareMessage?.call(index, messages);
+          widget.onShareMessage?.call(index, widget.messages);
+        } else if (action == MessageMoreAction.selectMessages) {
+          widget.onSelectMessages?.call(index, widget.messages);
         }
       },
-      toolParts: message.role == 'assistant' ? toolParts[message.id] : null,
+      toolParts: message.role == 'assistant'
+          ? widget.toolParts[message.id]
+          : null,
       contentSplitOffsets: message.role == 'assistant'
-          ? contentSplits[message.id]?.offsets
+          ? widget.contentSplits[message.id]?.offsets
           : null,
       reasoningCountAtSplit: message.role == 'assistant'
-          ? contentSplits[message.id]?.reasoningCounts
+          ? widget.contentSplits[message.id]?.reasoningCounts
           : null,
       toolCountAtSplit: message.role == 'assistant'
-          ? contentSplits[message.id]?.toolCounts
+          ? widget.contentSplits[message.id]?.toolCounts
           : null,
       reasoningSegments: message.role == 'assistant'
           ? (() {
-              final segments = reasoningSegments[message.id];
+              final segments = widget.reasoningSegments[message.id];
               if (segments == null || segments.isEmpty) return null;
               return segments
                   .asMap()
@@ -618,8 +873,10 @@ class MessageListView extends StatelessWidget {
                           entry.value.text.isNotEmpty,
                       startAt: entry.value.startAt,
                       finishedAt: entry.value.finishedAt,
-                      onToggle: () =>
-                          onToggleReasoningSegment?.call(message.id, entry.key),
+                      onToggle: () => widget.onToggleReasoningSegment?.call(
+                        message.id,
+                        entry.key,
+                      ),
                       toolStartIndex: entry.value.toolStartIndex,
                     ),
                   )
@@ -627,6 +884,116 @@ class MessageListView extends StatelessWidget {
             })()
           : null,
       isProcessingFiles: isProcessingFiles,
+      suggestions: suggestions,
+      onSuggestionTap: widget.onSuggestionTap,
+      onRecoveredAskUserAnswer: widget.onRecoveredAskUserAnswer == null
+          ? null
+          : (part, result) =>
+                widget.onRecoveredAskUserAnswer!(message, part, result),
     );
   }
+}
+
+class _StreamingMessageDataGate extends StatefulWidget {
+  const _StreamingMessageDataGate({
+    required this.notifier,
+    required this.deferUpdates,
+    required this.builder,
+  });
+
+  final ValueNotifier<StreamingContentData> notifier;
+  final ValueListenable<bool> deferUpdates;
+  final Widget Function(
+    BuildContext context,
+    StreamingContentData data,
+    bool deferUpdates,
+  )
+  builder;
+
+  @override
+  State<_StreamingMessageDataGate> createState() =>
+      _StreamingMessageDataGateState();
+}
+
+class _StreamingMessageDataGateState extends State<_StreamingMessageDataGate> {
+  late StreamingContentData _visibleData;
+  late bool _deferUpdates;
+  bool _hasDeferredUpdate = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _visibleData = widget.notifier.value;
+    _deferUpdates = widget.deferUpdates.value;
+    widget.notifier.addListener(_handleNotifierChanged);
+    widget.deferUpdates.addListener(_handleDeferUpdatesChanged);
+  }
+
+  @override
+  void didUpdateWidget(covariant _StreamingMessageDataGate oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.notifier != widget.notifier) {
+      oldWidget.notifier.removeListener(_handleNotifierChanged);
+      _visibleData = widget.notifier.value;
+      _hasDeferredUpdate = false;
+      widget.notifier.addListener(_handleNotifierChanged);
+    }
+
+    if (oldWidget.deferUpdates != widget.deferUpdates) {
+      oldWidget.deferUpdates.removeListener(_handleDeferUpdatesChanged);
+      _deferUpdates = widget.deferUpdates.value;
+      widget.deferUpdates.addListener(_handleDeferUpdatesChanged);
+    }
+  }
+
+  void _handleNotifierChanged() {
+    if (_deferUpdates) {
+      _hasDeferredUpdate = true;
+      return;
+    }
+    if (_visibleData == widget.notifier.value) return;
+    setState(() {
+      _visibleData = widget.notifier.value;
+      _hasDeferredUpdate = false;
+    });
+  }
+
+  void _handleDeferUpdatesChanged() {
+    final next = widget.deferUpdates.value;
+    if (_deferUpdates == next) return;
+    if (!next) {
+      _deferUpdates = next;
+      final hadDeferredUpdate = _hasDeferredUpdate;
+      _applyLatestDeferredData();
+      if (!hadDeferredUpdate && _visibleData == widget.notifier.value) {
+        setState(() {});
+      }
+      return;
+    }
+    setState(() => _deferUpdates = next);
+  }
+
+  void _applyLatestDeferredData({bool notify = true}) {
+    if (!_hasDeferredUpdate && _visibleData == widget.notifier.value) return;
+    if (!notify) {
+      _visibleData = widget.notifier.value;
+      _hasDeferredUpdate = false;
+      return;
+    }
+    setState(() {
+      _visibleData = widget.notifier.value;
+      _hasDeferredUpdate = false;
+    });
+  }
+
+  @override
+  void dispose() {
+    widget.notifier.removeListener(_handleNotifierChanged);
+    widget.deferUpdates.removeListener(_handleDeferUpdatesChanged);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) =>
+      widget.builder(context, _visibleData, _deferUpdates);
 }

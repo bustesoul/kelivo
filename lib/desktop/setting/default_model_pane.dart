@@ -3,9 +3,13 @@ import 'package:provider/provider.dart';
 import '../../icons/lucide_adapter.dart' as lucide;
 import '../../l10n/app_localizations.dart';
 import '../../core/providers/settings_provider.dart';
+import '../../shared/widgets/snackbar.dart';
+import '../../shared/widgets/ios_switch.dart';
 import '../../features/model/widgets/model_select_sheet.dart';
+import '../../features/model/utils/ocr_model_capability.dart';
 import '../../utils/brand_assets.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import '../../theme/app_font_weights.dart';
 
 class DesktopDefaultModelPane extends StatelessWidget {
   const DesktopDefaultModelPane({super.key});
@@ -15,6 +19,17 @@ class DesktopDefaultModelPane extends StatelessWidget {
     final cs = Theme.of(context).colorScheme;
     final l10n = AppLocalizations.of(context)!;
     final settings = context.watch<SettingsProvider>();
+    Future<ModelSelection?> pickConfiguredModel(
+      String? providerKey,
+      String? modelId,
+    ) {
+      return showModelSelector(
+        context,
+        initialProviderKey: providerKey,
+        initialModelId: modelId,
+      );
+    }
+
     return Container(
       alignment: Alignment.topCenter,
       child: SingleChildScrollView(
@@ -34,7 +49,7 @@ class DesktopDefaultModelPane extends StatelessWidget {
                         l10n.defaultModelPageTitle,
                         style: TextStyle(
                           fontSize: 14,
-                          fontWeight: FontWeight.w400,
+                          fontWeight: AppFontWeights.regular,
                           color: cs.onSurface.withValues(alpha: 0.9),
                         ),
                       ),
@@ -55,7 +70,10 @@ class DesktopDefaultModelPane extends StatelessWidget {
                     },
                     onPick: () async {
                       final settingsProvider = context.read<SettingsProvider>();
-                      final sel = await showModelSelector(context);
+                      final sel = await pickConfiguredModel(
+                        settings.currentModelProvider,
+                        settings.currentModelId,
+                      );
                       if (sel != null) {
                         await settingsProvider.setCurrentModel(
                           sel.providerKey,
@@ -79,7 +97,10 @@ class DesktopDefaultModelPane extends StatelessWidget {
                     },
                     onPick: () async {
                       final settingsProvider = context.read<SettingsProvider>();
-                      final sel = await showModelSelector(context);
+                      final sel = await pickConfiguredModel(
+                        settings.titleModelProvider,
+                        settings.titleModelId,
+                      );
                       if (sel != null) {
                         await settingsProvider.setTitleModel(
                           sel.providerKey,
@@ -109,7 +130,10 @@ class DesktopDefaultModelPane extends StatelessWidget {
                     },
                     onPick: () async {
                       final settingsProvider = context.read<SettingsProvider>();
-                      final sel = await showModelSelector(context);
+                      final sel = await pickConfiguredModel(
+                        settings.summaryModelProvider,
+                        settings.summaryModelId,
+                      );
                       if (sel != null) {
                         await settingsProvider.setSummaryModel(
                           sel.providerKey,
@@ -118,6 +142,35 @@ class DesktopDefaultModelPane extends StatelessWidget {
                       }
                     },
                     configAction: () => _showSummaryPromptDialog(context),
+                  ),
+
+                  const SizedBox(height: 16),
+                  _ModelCard(
+                    icon: lucide.Lucide.MessagesSquare,
+                    title: l10n.defaultModelPageSuggestionModelTitle,
+                    subtitle: l10n.defaultModelPageSuggestionModelSubtitle,
+                    modelProvider: settings.suggestionModelProvider,
+                    modelId: settings.suggestionModelId,
+                    disabledWhenUnset: true,
+                    onReset: () async {
+                      await context
+                          .read<SettingsProvider>()
+                          .resetSuggestionModel();
+                    },
+                    onPick: () async {
+                      final settingsProvider = context.read<SettingsProvider>();
+                      final sel = await pickConfiguredModel(
+                        settings.suggestionModelProvider,
+                        settings.suggestionModelId,
+                      );
+                      if (sel != null) {
+                        await settingsProvider.setSuggestionModel(
+                          sel.providerKey,
+                          sel.modelId,
+                        );
+                      }
+                    },
+                    configAction: () => _showSuggestionPromptDialog(context),
                   ),
 
                   const SizedBox(height: 16),
@@ -142,7 +195,10 @@ class DesktopDefaultModelPane extends StatelessWidget {
                     },
                     onPick: () async {
                       final settingsProvider = context.read<SettingsProvider>();
-                      final sel = await showModelSelector(context);
+                      final sel = await pickConfiguredModel(
+                        settings.compressModelProvider,
+                        settings.compressModelId,
+                      );
                       if (sel != null) {
                         await settingsProvider.setCompressModel(
                           sel.providerKey,
@@ -169,7 +225,10 @@ class DesktopDefaultModelPane extends StatelessWidget {
                     },
                     onPick: () async {
                       final settingsProvider = context.read<SettingsProvider>();
-                      final sel = await showModelSelector(context);
+                      final sel = await pickConfiguredModel(
+                        settings.translateModelProvider,
+                        settings.translateModelId,
+                      );
                       if (sel != null) {
                         await settingsProvider.setTranslateModel(
                           sel.providerKey,
@@ -186,15 +245,31 @@ class DesktopDefaultModelPane extends StatelessWidget {
                     subtitle: l10n.defaultModelPageOcrModelSubtitle,
                     modelProvider: settings.ocrModelProvider,
                     modelId: settings.ocrModelId,
-                    fallbackProvider: settings.currentModelProvider,
-                    fallbackModelId: settings.currentModelId,
+                    disabledWhenUnset: true,
                     onReset: () async {
                       await context.read<SettingsProvider>().resetOcrModel();
                     },
                     onPick: () async {
                       final settingsProvider = context.read<SettingsProvider>();
-                      final sel = await showModelSelector(context);
+                      final sel = await pickConfiguredModel(
+                        settings.ocrModelProvider,
+                        settings.ocrModelId,
+                      );
                       if (sel != null) {
+                        if (!modelSupportsOcrImageInput(
+                          settingsProvider,
+                          sel.providerKey,
+                          sel.modelId,
+                        )) {
+                          if (!context.mounted) return;
+                          showAppSnackBar(
+                            context,
+                            message:
+                                l10n.defaultModelPageOcrModelRequiresImageInput,
+                            type: NotificationType.error,
+                          );
+                          return;
+                        }
                         await settingsProvider.setOcrModel(
                           sel.providerKey,
                           sel.modelId,
@@ -221,82 +296,87 @@ class DesktopDefaultModelPane extends StatelessWidget {
       context: context,
       barrierDismissible: true,
       builder: (ctx) {
-        return Dialog(
-          backgroundColor: cs.surface,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
-          ),
-          insetPadding: const EdgeInsets.symmetric(
-            horizontal: 24,
-            vertical: 24,
-          ),
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 600),
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Row(
+        return Consumer<SettingsProvider>(
+          builder: (context, sp, _) {
+            return Dialog(
+              backgroundColor: cs.surface,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
+              insetPadding: const EdgeInsets.symmetric(
+                horizontal: 24,
+                vertical: 24,
+              ),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 600),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      Expanded(
-                        child: Text(
-                          l10n.defaultModelPagePromptLabel,
-                          style: const TextStyle(
-                            fontSize: 13.5,
-                            fontWeight: FontWeight.w700,
-                          ),
+                      _TitleThinkingSwitchRow(
+                        settings: sp,
+                        l10n: l10n,
+                        cs: cs,
+                        trailing: _SmallIconBtn(
+                          icon: lucide.Lucide.X,
+                          onTap: () => Navigator.of(ctx).maybePop(),
                         ),
                       ),
-                      _SmallIconBtn(
-                        icon: lucide.Lucide.X,
-                        onTap: () => Navigator.of(ctx).maybePop(),
+                      const SizedBox(height: 16),
+                      Text(
+                        l10n.defaultModelPagePromptLabel,
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: AppFontWeights.semibold,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      _promptEditor(
+                        ctx,
+                        controller: ctrl,
+                        hintText: l10n.defaultModelPageTitlePromptHint,
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        l10n.defaultModelPageTitleVars('{content}', '{locale}'),
+                        style: TextStyle(
+                          color: cs.onSurface.withValues(alpha: 0.6),
+                          fontSize: 12,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          _DeskIosButton(
+                            label: l10n.defaultModelPageResetDefault,
+                            filled: false,
+                            dense: true,
+                            onTap: () async {
+                              await sp.resetTitlePrompt();
+                              await sp.resetTitleGenerationThinkingEnabled();
+                              ctrl.text = sp.titlePrompt;
+                            },
+                          ),
+                          const Spacer(),
+                          _DeskIosButton(
+                            label: l10n.defaultModelPageSave,
+                            filled: true,
+                            dense: true,
+                            onTap: () async {
+                              await sp.setTitlePrompt(ctrl.text.trim());
+                              if (ctx.mounted) Navigator.of(ctx).maybePop();
+                            },
+                          ),
+                        ],
                       ),
                     ],
                   ),
-                  const SizedBox(height: 10),
-                  _promptEditor(
-                    ctx,
-                    controller: ctrl,
-                    hintText: l10n.defaultModelPageTitlePromptHint,
-                  ),
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      _DeskIosButton(
-                        label: l10n.defaultModelPageResetDefault,
-                        filled: false,
-                        dense: true,
-                        onTap: () async {
-                          await sp.resetTitlePrompt();
-                          ctrl.text = sp.titlePrompt;
-                        },
-                      ),
-                      const Spacer(),
-                      _DeskIosButton(
-                        label: l10n.defaultModelPageSave,
-                        filled: true,
-                        dense: true,
-                        onTap: () async {
-                          await sp.setTitlePrompt(ctrl.text.trim());
-                          if (ctx.mounted) Navigator.of(ctx).maybePop();
-                        },
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    l10n.defaultModelPageTitleVars('{content}', '{locale}'),
-                    style: TextStyle(
-                      color: cs.onSurface.withValues(alpha: 0.6),
-                      fontSize: 12,
-                    ),
-                  ),
-                ],
+                ),
               ),
-            ),
-          ),
+            );
+          },
         );
       },
     );
@@ -333,9 +413,9 @@ class DesktopDefaultModelPane extends StatelessWidget {
                       Expanded(
                         child: Text(
                           l10n.defaultModelPagePromptLabel,
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 13.5,
-                            fontWeight: FontWeight.w700,
+                            fontWeight: AppFontWeights.emphasis,
                           ),
                         ),
                       ),
@@ -426,9 +506,9 @@ class DesktopDefaultModelPane extends StatelessWidget {
                       Expanded(
                         child: Text(
                           l10n.defaultModelPagePromptLabel,
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 13.5,
-                            fontWeight: FontWeight.w700,
+                            fontWeight: AppFontWeights.emphasis,
                           ),
                         ),
                       ),
@@ -508,9 +588,9 @@ class DesktopDefaultModelPane extends StatelessWidget {
                       Expanded(
                         child: Text(
                           l10n.defaultModelPagePromptLabel,
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 13.5,
-                            fontWeight: FontWeight.w700,
+                            fontWeight: AppFontWeights.emphasis,
                           ),
                         ),
                       ),
@@ -601,9 +681,9 @@ class DesktopDefaultModelPane extends StatelessWidget {
                       Expanded(
                         child: Text(
                           l10n.defaultModelPagePromptLabel,
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 13.5,
-                            fontWeight: FontWeight.w700,
+                            fontWeight: AppFontWeights.emphasis,
                           ),
                         ),
                       ),
@@ -659,6 +739,99 @@ class DesktopDefaultModelPane extends StatelessWidget {
       },
     );
   }
+
+  Future<void> _showSuggestionPromptDialog(BuildContext context) async {
+    final cs = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context)!;
+    final sp = context.read<SettingsProvider>();
+    final ctrl = TextEditingController(text: sp.suggestionPrompt);
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) {
+        return Dialog(
+          backgroundColor: cs.surface,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+          ),
+          insetPadding: const EdgeInsets.symmetric(
+            horizontal: 24,
+            vertical: 24,
+          ),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 600),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          l10n.defaultModelPagePromptLabel,
+                          style: TextStyle(
+                            fontSize: 13.5,
+                            fontWeight: AppFontWeights.emphasis,
+                          ),
+                        ),
+                      ),
+                      _SmallIconBtn(
+                        icon: lucide.Lucide.X,
+                        onTap: () => Navigator.of(ctx).maybePop(),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  _promptEditor(
+                    ctx,
+                    controller: ctrl,
+                    hintText: l10n.defaultModelPageSuggestionPromptHint,
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      _DeskIosButton(
+                        label: l10n.defaultModelPageResetDefault,
+                        filled: false,
+                        dense: true,
+                        onTap: () async {
+                          await sp.resetSuggestionPrompt();
+                          ctrl.text = sp.suggestionPrompt;
+                        },
+                      ),
+                      const Spacer(),
+                      _DeskIosButton(
+                        label: l10n.defaultModelPageSave,
+                        filled: true,
+                        dense: true,
+                        onTap: () async {
+                          await sp.setSuggestionPrompt(ctrl.text.trim());
+                          if (ctx.mounted) Navigator.of(ctx).maybePop();
+                        },
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    l10n.defaultModelPageSuggestionVars(
+                      '{content}',
+                      '{locale}',
+                    ),
+                    style: TextStyle(
+                      color: cs.onSurface.withValues(alpha: 0.6),
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
 }
 
 class _ModelCard extends StatefulWidget {
@@ -671,6 +844,7 @@ class _ModelCard extends StatefulWidget {
     required this.onPick,
     this.fallbackProvider,
     this.fallbackModelId,
+    this.disabledWhenUnset = false,
     this.onReset,
     this.configAction,
   });
@@ -682,6 +856,7 @@ class _ModelCard extends StatefulWidget {
   final String? modelId;
   final String? fallbackProvider;
   final String? fallbackModelId;
+  final bool disabledWhenUnset;
   final VoidCallback? onReset;
   final VoidCallback onPick;
   final VoidCallback? configAction;
@@ -727,7 +902,9 @@ class _ModelCardState extends State<_ModelCard> {
       }
     }
     if (usingFallback) {
-      modelDisplay = l10n.defaultModelPageUseCurrentModel;
+      modelDisplay = widget.disabledWhenUnset
+          ? l10n.defaultModelPageNotEnabled
+          : l10n.defaultModelPageUseCurrentModel;
     }
 
     final baseBg = isDark
@@ -761,9 +938,9 @@ class _ModelCardState extends State<_ModelCard> {
                     widget.title,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 15,
-                      fontWeight: FontWeight.w600,
+                      fontWeight: AppFontWeights.semibold,
                     ),
                   ),
                 ),
@@ -823,9 +1000,9 @@ class _ModelCardState extends State<_ModelCard> {
                           modelDisplay ?? (providerName ?? '-'),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 14,
-                            fontWeight: FontWeight.w600,
+                            fontWeight: AppFontWeights.semibold,
                           ),
                         ),
                       ),
@@ -837,6 +1014,69 @@ class _ModelCardState extends State<_ModelCard> {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _TitleThinkingSwitchRow extends StatelessWidget {
+  const _TitleThinkingSwitchRow({
+    required this.settings,
+    required this.l10n,
+    required this.cs,
+    required this.trailing,
+  });
+
+  final SettingsProvider settings;
+  final AppLocalizations l10n;
+  final ColorScheme cs;
+  final Widget trailing;
+
+  @override
+  Widget build(BuildContext context) {
+    final value = settings.titleGenerationThinkingEnabled;
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => settings.setTitleGenerationThinkingEnabled(!value),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 2),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    Expanded(
+                      child: Text(
+                        l10n.titleModelThinkingTitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 13.5,
+                          fontWeight: AppFontWeights.semibold,
+                          color: cs.onSurface.withValues(alpha: 0.92),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 14),
+                    IosSwitch(
+                      value: value,
+                      hitTestSize: 36,
+                      semanticLabel: l10n.titleModelThinkingTitle,
+                      onChanged: settings.setTitleGenerationThinkingEnabled,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        trailing,
+      ],
     );
   }
 }
@@ -906,7 +1146,7 @@ class _DeskIosButtonState extends State<_DeskIosButton> {
               widget.label,
               style: TextStyle(
                 color: textColor,
-                fontWeight: FontWeight.w600,
+                fontWeight: AppFontWeights.semibold,
                 fontSize: widget.dense ? 13 : 14,
               ),
             ),
@@ -972,7 +1212,7 @@ class _BrandCircle extends StatelessWidget {
         name.isNotEmpty ? name.characters.first.toUpperCase() : '?',
         style: TextStyle(
           color: cs.primary,
-          fontWeight: FontWeight.w800,
+          fontWeight: AppFontWeights.heavy,
           fontSize: size * 0.45,
         ),
       );
@@ -1021,7 +1261,7 @@ Widget _promptEditor(
       minLines: null,
       expands: true,
       textAlignVertical: TextAlignVertical.top,
-      style: const TextStyle(fontSize: 14),
+      style: TextStyle(fontSize: 14),
       decoration: _deskInputDecoration(context).copyWith(hintText: hintText),
     ),
   );

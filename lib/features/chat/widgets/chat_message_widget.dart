@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart'
     show defaultTargetPlatform, TargetPlatform;
@@ -33,12 +34,19 @@ import '../../../l10n/app_localizations.dart';
 import '../../../core/providers/settings_provider.dart';
 import '../../../core/providers/model_provider.dart';
 import '../../../core/models/assistant_regex.dart';
+import '../../../shared/widgets/ios_checkbox.dart';
 import '../../../shared/widgets/ios_tactile.dart';
 import '../../../desktop/desktop_context_menu.dart';
 import '../../../desktop/menu_anchor.dart';
 import '../../../shared/widgets/emoji_text.dart';
+import '../../home/services/ask_user_interaction_service.dart';
+import '../../home/services/local_tools_service.dart';
 import '../../home/services/tool_approval_service.dart';
+import '../utils/thinking_tag_parser.dart';
+import 'citation_sources_sheet.dart';
+import 'chat_suggestion_bubbles.dart';
 import 'token_display_widget.dart';
+import '../../../theme/app_font_weights.dart';
 
 final RegExp _urlSchemeRe = RegExp(r'^[a-zA-Z][a-zA-Z0-9+.-]*:');
 
@@ -87,7 +95,9 @@ Uri? _tryNormalizeExternalUri(String raw) {
   return (cleanText.trim(), images);
 }
 
-IconData _toolIconFor(String name) {
+IconData _toolIconFor(String name, [Map<String, dynamic> args = const {}]) {
+  final localIcon = _localToolIconFor(name, args);
+  if (localIcon != null) return localIcon;
   switch (name) {
     case 'create_memory':
       return Lucide.bookHeart;
@@ -104,6 +114,123 @@ IconData _toolIconFor(String name) {
   }
 }
 
+IconData? _localToolIconFor(String name, Map<String, dynamic> args) {
+  if (name == LocalToolNames.askUser) {
+    return Lucide.MessageCircleQuestionMark;
+  }
+  return switch (name) {
+    LocalToolNames.timeInfo => Lucide.clock,
+    LocalToolNames.clipboard => switch ((args['action'] ?? '').toString()) {
+      'read' => Lucide.ClipboardCheck,
+      'write' => Lucide.ClipboardPen,
+      _ => Lucide.Clipboard,
+    },
+    LocalToolNames.textToSpeech => Lucide.Volume2,
+    LocalToolNames.calculate => Lucide.Calculator,
+    _ => null,
+  };
+}
+
+String? _localToolTitleFor(
+  AppLocalizations l10n,
+  String name,
+  Map<String, dynamic> args,
+) {
+  if (name == LocalToolNames.askUser) {
+    return _askUserToolTitleFor(l10n, args);
+  }
+  return switch (name) {
+    LocalToolNames.timeInfo => l10n.assistantEditLocalToolTimeInfoTitle,
+    LocalToolNames.clipboard => switch ((args['action'] ?? '').toString()) {
+      'read' => l10n.chatMessageWidgetReadClipboard,
+      'write' => l10n.chatMessageWidgetWriteClipboard,
+      _ => l10n.assistantEditLocalToolClipboardTitle,
+    },
+    LocalToolNames.textToSpeech => l10n.chatMessageWidgetSpeakingTitle,
+    LocalToolNames.calculate => l10n.assistantEditLocalToolCalculateTitle,
+    _ => null,
+  };
+}
+
+String _textToSpeechToolText(Map<String, dynamic> args) {
+  return (args['text'] ?? '').toString().trim();
+}
+
+void _replayTextToSpeech(BuildContext context, String text) {
+  final content = text.trim();
+  if (content.isEmpty) return;
+
+  final tts = context.read<TtsProvider>();
+  if (!tts.isAvailable) {
+    FlutterError.reportError(
+      FlutterErrorDetails(
+        exception: StateError('Text-to-speech is unavailable.'),
+        library: 'Kelivo chat message tools',
+        context: ErrorDescription('while replaying text-to-speech'),
+      ),
+    );
+    return;
+  }
+
+  unawaited(
+    tts.speak(content).catchError((Object error, StackTrace stack) {
+      FlutterError.reportError(
+        FlutterErrorDetails(
+          exception: error,
+          stack: stack,
+          library: 'Kelivo chat message tools',
+          context: ErrorDescription('while replaying text-to-speech'),
+        ),
+      );
+    }),
+  );
+}
+
+Widget _buildTextToSpeechReplayRow(
+  BuildContext context, {
+  required String text,
+  required Color textColor,
+  required Color buttonColor,
+  double fontSize = 12,
+  int maxLines = 2,
+}) {
+  final l10n = AppLocalizations.of(context)!;
+  return Row(
+    crossAxisAlignment: CrossAxisAlignment.center,
+    children: [
+      Expanded(
+        child: Text(
+          text,
+          maxLines: maxLines,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(fontSize: fontSize, height: 1.4, color: textColor),
+        ),
+      ),
+      const SizedBox(width: 8),
+      Tooltip(
+        message: l10n.ttsFloatingReplayTooltip,
+        child: IosIconButton(
+          size: 14,
+          minSize: 30,
+          padding: const EdgeInsets.all(6),
+          color: buttonColor,
+          semanticLabel: l10n.ttsFloatingReplayTooltip,
+          builder: (color) => Icon(Lucide.RefreshCw, size: 14, color: color),
+          onTap: () => _replayTextToSpeech(context, text),
+        ),
+      ),
+    ],
+  );
+}
+
+String _askUserToolTitleFor(AppLocalizations l10n, Map<String, dynamic> args) {
+  final questions = AskUserInteractionService.normalizeQuestions(args);
+  if (questions.isNotEmpty) {
+    return l10n.askUserCardQuestionCount(questions.length);
+  }
+  return l10n.assistantEditLocalToolAskUserTitle;
+}
+
 String _toolTitleFor(
   BuildContext context,
   String name,
@@ -111,6 +238,11 @@ String _toolTitleFor(
   required bool isResult,
 }) {
   final l10n = AppLocalizations.of(context)!;
+  if (name == LocalToolNames.askUser) {
+    return _askUserToolTitleFor(l10n, args);
+  }
+  final localToolTitle = _localToolTitleFor(l10n, name, args);
+  if (localToolTitle != null) return localToolTitle;
   switch (name) {
     case 'create_memory':
       return l10n.chatMessageWidgetCreateMemory;
@@ -248,7 +380,7 @@ void _showToolDetail(BuildContext context, ToolUIPart part) {
                       child: Row(
                         children: [
                           Icon(
-                            _toolIconFor(part.toolName),
+                            _toolIconFor(part.toolName, part.arguments),
                             size: 18,
                             color: cs.primary,
                           ),
@@ -261,9 +393,9 @@ void _showToolDetail(BuildContext context, ToolUIPart part) {
                                 part.arguments,
                                 isResult: !part.loading,
                               ),
-                              style: const TextStyle(
+                              style: TextStyle(
                                 fontSize: 16,
-                                fontWeight: FontWeight.w700,
+                                fontWeight: AppFontWeights.emphasis,
                               ),
                               maxLines: 2,
                               overflow: TextOverflow.ellipsis,
@@ -317,7 +449,7 @@ void _showToolDetail(BuildContext context, ToolUIPart part) {
                                 ),
                                 child: SelectableText(
                                   argsPretty,
-                                  style: const TextStyle(fontSize: 12),
+                                  style: TextStyle(fontSize: 12),
                                 ),
                               ),
                               const SizedBox(height: 12),
@@ -347,7 +479,7 @@ void _showToolDetail(BuildContext context, ToolUIPart part) {
                                 ),
                                 child: SelectableText(
                                   resultText,
-                                  style: const TextStyle(fontSize: 12),
+                                  style: TextStyle(fontSize: 12),
                                 ),
                               ),
                               if (images.isNotEmpty) ...[
@@ -416,7 +548,7 @@ void _showToolDetail(BuildContext context, ToolUIPart part) {
                   Row(
                     children: [
                       Icon(
-                        _toolIconFor(part.toolName),
+                        _toolIconFor(part.toolName, part.arguments),
                         size: 18,
                         color: cs.primary,
                       ),
@@ -429,9 +561,9 @@ void _showToolDetail(BuildContext context, ToolUIPart part) {
                             part.arguments,
                             isResult: !part.loading,
                           ),
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 16,
-                            fontWeight: FontWeight.w700,
+                            fontWeight: AppFontWeights.emphasis,
                           ),
                         ),
                       ),
@@ -460,7 +592,7 @@ void _showToolDetail(BuildContext context, ToolUIPart part) {
                     ),
                     child: SelectableText(
                       argsPretty,
-                      style: const TextStyle(fontSize: 12),
+                      style: TextStyle(fontSize: 12),
                     ),
                   ),
                   const SizedBox(height: 12),
@@ -486,7 +618,7 @@ void _showToolDetail(BuildContext context, ToolUIPart part) {
                     ),
                     child: SelectableText(
                       resultText,
-                      style: const TextStyle(fontSize: 12),
+                      style: TextStyle(fontSize: 12),
                     ),
                   ),
                   if (images.isNotEmpty) ...[
@@ -577,6 +709,11 @@ class ChatMessageWidget extends StatefulWidget {
   final bool hideStreamingIndicator;
   // Whether files are currently being processed
   final bool isProcessingFiles;
+  final bool enableStreamingTextMotion;
+  final List<String> suggestions;
+  final ValueChanged<String>? onSuggestionTap;
+  final Future<void> Function(ToolUIPart part, AskUserResult result)?
+  onRecoveredAskUserAnswer;
 
   const ChatMessageWidget({
     super.key,
@@ -616,6 +753,10 @@ class ChatMessageWidget extends StatefulWidget {
     this.toolCountAtSplit,
     this.hideStreamingIndicator = false,
     this.isProcessingFiles = false,
+    this.enableStreamingTextMotion = true,
+    this.suggestions = const <String>[],
+    this.onSuggestionTap,
+    this.onRecoveredAskUserAnswer,
   });
 
   @override
@@ -623,11 +764,6 @@ class ChatMessageWidget extends StatefulWidget {
 }
 
 class _ChatMessageWidgetState extends State<ChatMessageWidget> {
-  // Match vendor inline thinking blocks: <think>...</think> or <thought>...</thought> (or until end)
-  static final RegExp _thinkingRegex = RegExp(
-    r"<(?:think|thought)>([\s\S]*?)(?:</(?:think|thought)>|$)",
-    dotAll: true,
-  );
   final DateFormat _dateFormat = DateFormat('yyyy-MM-dd HH:mm:ss');
   final ScrollController _reasoningScroll = ScrollController();
   bool _tickActive = false;
@@ -657,30 +793,16 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
     // Determine initial state for inline <think> card BEFORE first paint to avoid
     // post-frame size changes that can cause list scroll jitter/snapping.
     try {
-      // Check whether this message is using inline <think> content
-      final extracted = _thinkingRegex
-          .allMatches(widget.message.content)
-          .map((m) => (m.group(1) ?? '').trim())
-          .where((s) => s.isNotEmpty)
-          .join('\n\n');
+      final parsed = _legacyInlineThinkingFor(widget);
+      final extracted = parsed.thinkingTexts.join('\n\n');
       final usingInlineThink =
           (widget.reasoningText == null || widget.reasoningText!.isEmpty) &&
           extracted.isNotEmpty;
-      final loading =
-          usingInlineThink &&
-          widget.message.isStreaming &&
-          !widget.message.content.contains('</think>');
-
       if (usingInlineThink && _inlineThinkExpanded == null) {
         final autoCollapse = context
             .read<SettingsProvider>()
             .autoCollapseThinking;
-        // While loading we default to expanded; once finished honor auto-collapse.
-        _inlineThinkExpanded = loading
-            ? true
-            : !autoCollapse
-            ? true
-            : false;
+        _inlineThinkExpanded = !autoCollapse ? true : false;
       }
     } catch (_) {
       // If anything fails here, fall back to later update logic.
@@ -697,44 +819,31 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
 
   void _applyAutoCollapseInlineThinkIfFinished({ChatMessageWidget? oldWidget}) {
     if (!mounted) return;
-    // Determine if using inline <think>
-    final newExtracted = _thinkingRegex
-        .allMatches(widget.message.content)
-        .map((m) => (m.group(1) ?? '').trim())
-        .where((s) => s.isNotEmpty)
-        .join('\n\n');
+    final newExtracted = _legacyInlineThinkingFor(
+      widget,
+    ).thinkingTexts.join('\n\n');
     final usingInlineThinkNew =
         (widget.reasoningText == null || widget.reasoningText!.isEmpty) &&
         newExtracted.isNotEmpty;
-    final loadingNew =
-        usingInlineThinkNew &&
-        widget.message.isStreaming &&
-        !widget.message.content.contains('</think>');
 
-    bool loadingOld = false;
+    bool usingInlineThinkOld = false;
     if (oldWidget != null) {
-      final oldExtracted = _thinkingRegex
-          .allMatches(oldWidget.message.content)
-          .map((m) => (m.group(1) ?? '').trim())
-          .where((s) => s.isNotEmpty)
-          .join('\n\n');
-      final usingInlineThinkOld =
+      final oldExtracted = _legacyInlineThinkingFor(
+        oldWidget,
+      ).thinkingTexts.join('\n\n');
+      usingInlineThinkOld =
           (oldWidget.reasoningText == null ||
               oldWidget.reasoningText!.isEmpty) &&
           oldExtracted.isNotEmpty;
-      loadingOld =
-          usingInlineThinkOld &&
-          oldWidget.message.isStreaming &&
-          !oldWidget.message.content.contains('</think>');
     }
 
     final autoCollapse = context.read<SettingsProvider>().autoCollapseThinking;
 
     // If finished now (not loading), inline think is used, and auto-collapse is on
     // Only collapse when user hasn't manually toggled; also if we don't yet have a chosen state.
-    final finishedNow = usingInlineThinkNew && !loadingNew;
+    final finishedNow = usingInlineThinkNew;
     final justFinished = oldWidget != null
-        ? (loadingOld && finishedNow)
+        ? (!usingInlineThinkOld && finishedNow)
         : finishedNow;
 
     if (autoCollapse && finishedNow && justFinished) {
@@ -747,7 +856,6 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
     // On first mount where already finished and no user choice yet, honor autoCollapse
     if (oldWidget == null &&
         usingInlineThinkNew &&
-        !loadingNew &&
         _inlineThinkExpanded == null) {
       if (autoCollapse) {
         if (mounted) setState(() => _inlineThinkExpanded = false);
@@ -768,6 +876,18 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
     } else {
       if (_ticker.isActive) _ticker.stop();
     }
+  }
+
+  ThinkingTagParseResult _legacyInlineThinkingFor(ChatMessageWidget widget) {
+    if ((widget.reasoningText?.isNotEmpty ?? false) ||
+        widget.reasoningLoading ||
+        (widget.reasoningSegments?.isNotEmpty ?? false)) {
+      return ThinkingTagParseResult(
+        visibleContent: widget.message.content,
+        thinkingTexts: const <String>[],
+      );
+    }
+    return ThinkingTagParser.parseLegacyInlineBlocks(widget.message.content);
   }
 
   String _assistantNameFallback() {
@@ -796,6 +916,38 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
     } catch (_) {
       return null;
     }
+  }
+
+  Future<void> _confirmRegeneration(VoidCallback action) async {
+    final settings = context.read<SettingsProvider>();
+    if (!settings.showRegenerateConfirmDialog) {
+      action();
+      return;
+    }
+
+    final l10n = AppLocalizations.of(context)!;
+    final content = settings.regenerateDeleteTrailingMessages
+        ? l10n.chatMessageWidgetRegenerateConfirmDeleteTrailingContent
+        : l10n.chatMessageWidgetRegenerateConfirmContent;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dctx) => AlertDialog(
+        backgroundColor: Theme.of(dctx).colorScheme.surface,
+        title: Text(l10n.chatMessageWidgetRegenerateConfirmTitle),
+        content: Text(content),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dctx).pop(false),
+            child: Text(l10n.chatMessageWidgetRegenerateConfirmCancel),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dctx).pop(true),
+            child: Text(l10n.chatMessageWidgetRegenerateConfirmOk),
+          ),
+        ],
+      ),
+    );
+    if (ok == true && mounted) action();
   }
 
   String _resolveModelDisplayName(SettingsProvider settings) {
@@ -990,14 +1142,15 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
                                   }
                                 },
                               ),
-                              _MenuItem(
-                                icon: Lucide.Pencil,
-                                label: l10n.messageMoreSheetEdit,
-                                onTap: () {
-                                  Navigator.of(ctx).pop();
-                                  (widget.onEdit ?? widget.onMore)?.call();
-                                },
-                              ),
+                              if (widget.onEdit != null)
+                                _MenuItem(
+                                  icon: Lucide.Pencil,
+                                  label: l10n.messageMoreSheetEdit,
+                                  onTap: () {
+                                    Navigator.of(ctx).pop();
+                                    widget.onEdit?.call();
+                                  },
+                                ),
                               _MenuItem(
                                 icon: Lucide.Trash2,
                                 danger: true,
@@ -1119,7 +1272,10 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
     );
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-      child: _ToolCallItem(part: part),
+      child: _ToolCallItem(
+        part: part,
+        onRecoveredAnswer: widget.onRecoveredAskUserAnswer,
+      ),
     );
   }
 
@@ -1139,6 +1295,21 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
     );
     final showUserActions = settings.showUserMessageActions;
     final showVersionSwitcher = (widget.versionCount ?? 1) > 1;
+    final mediaPreview = _buildUserAttachmentPreview(
+      context,
+      parsed: parsed,
+      isDark: isDark,
+    );
+    final textBubble = visualText.isNotEmpty
+        ? Container(
+            key: ValueKey('user-message-text-bubble:${widget.message.id}'),
+            child: _buildBubbleContainer(
+              context: context,
+              isUser: true,
+              child: _buildUserTextContent(context, visualText, settings, cs),
+            ),
+          )
+        : null;
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -1158,7 +1329,7 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
                         userProvider.name,
                         style: TextStyle(
                           fontSize: 13,
-                          fontWeight: FontWeight.w500,
+                          fontWeight: AppFontWeights.medium,
                           color: cs.onSurface.withValues(alpha: 0.7),
                         ),
                       ),
@@ -1206,237 +1377,15 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
               constraints: BoxConstraints(
                 maxWidth: MediaQuery.sizeOf(context).width * 0.75,
               ),
-              child: _buildBubbleContainer(
-                context: context,
-                isUser: true,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    if (visualText.isNotEmpty)
-                      Builder(
-                        builder: (context) {
-                          final bool isDesktop =
-                              defaultTargetPlatform == TargetPlatform.macOS ||
-                              defaultTargetPlatform == TargetPlatform.windows ||
-                              defaultTargetPlatform == TargetPlatform.linux;
-                          final double baseUser = isDesktop ? 14.0 : 15.5;
-
-                          Widget content;
-                          if (settings.enableUserMarkdown) {
-                            content = DefaultTextStyle.merge(
-                              style: TextStyle(
-                                fontSize: baseUser,
-                                height: 1.45,
-                              ),
-                              child: MarkdownWithCodeHighlight(
-                                text: visualText,
-                                baseStyle: TextStyle(
-                                  fontSize: baseUser,
-                                  height: 1.45,
-                                ),
-                              ),
-                            );
-                          } else {
-                            content = Text(
-                              visualText,
-                              style: TextStyle(
-                                fontSize:
-                                    baseUser, // slightly smaller on desktop for readability
-                                height: 1.4,
-                                color: cs.onSurface,
-                              ),
-                            );
-                          }
-
-                          // Enable desktop selection/copy for user messages
-                          return isDesktop
-                              ? SelectionArea(
-                                  key: ValueKey('user_${widget.message.id}'),
-                                  child: content,
-                                )
-                              : content;
-                        },
-                      ),
-                    if (parsed.images.isNotEmpty) ...[
-                      const SizedBox(height: 8),
-                      Builder(
-                        builder: (context) {
-                          final imgs = parsed.images;
-                          return Wrap(
-                            spacing: 8,
-                            runSpacing: 8,
-                            children: imgs.asMap().entries.map((entry) {
-                              final idx = entry.key;
-                              final p = entry.value;
-                              return Material(
-                                color: Colors.transparent,
-                                child: InkWell(
-                                  onTap: () {
-                                    Navigator.of(context).push(
-                                      PageRouteBuilder(
-                                        pageBuilder: (_, __, ___) =>
-                                            ImageViewerPage(
-                                              images: imgs,
-                                              initialIndex: idx,
-                                            ),
-                                        transitionDuration: const Duration(
-                                          milliseconds: 360,
-                                        ),
-                                        reverseTransitionDuration:
-                                            const Duration(milliseconds: 280),
-                                        transitionsBuilder:
-                                            (context, anim, sec, child) {
-                                              final curved = CurvedAnimation(
-                                                parent: anim,
-                                                curve: Curves.easeOutCubic,
-                                                reverseCurve:
-                                                    Curves.easeInCubic,
-                                              );
-                                              return FadeTransition(
-                                                opacity: curved,
-                                                child: SlideTransition(
-                                                  position: Tween<Offset>(
-                                                    begin: const Offset(
-                                                      0,
-                                                      0.02,
-                                                    ), // subtle upward drift
-                                                    end: Offset.zero,
-                                                  ).animate(curved),
-                                                  child: child,
-                                                ),
-                                              );
-                                            },
-                                      ),
-                                    );
-                                  },
-                                  borderRadius: BorderRadius.circular(8),
-                                  child: ClipRRect(
-                                    borderRadius: BorderRadius.circular(8),
-                                    child: Hero(
-                                      tag: 'img:$p',
-                                      child: Image.file(
-                                        File(SandboxPathResolver.fix(p)),
-                                        width: 96,
-                                        height: 96,
-                                        fit: BoxFit.cover,
-                                        errorBuilder: (_, __, ___) => Container(
-                                          width: 96,
-                                          height: 96,
-                                          color: Colors.black12,
-                                          child: const Icon(Icons.broken_image),
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              );
-                            }).toList(),
-                          );
-                        },
-                      ),
-                    ],
-                    if (parsed.docs.isNotEmpty) ...[
-                      const SizedBox(height: 8),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: parsed.docs.map((d) {
-                          return Material(
-                            color: Colors.transparent,
-                            child: InkWell(
-                              borderRadius: BorderRadius.circular(10),
-                              overlayColor: WidgetStateProperty.resolveWith(
-                                (states) => cs.primary.withValues(
-                                  alpha: states.contains(WidgetState.pressed)
-                                      ? 0.14
-                                      : 0.08,
-                                ),
-                              ),
-                              splashColor: cs.primary.withValues(alpha: 0.18),
-                              onTap: () async {
-                                try {
-                                  final fixed = SandboxPathResolver.fix(d.path);
-                                  final f = File(fixed);
-                                  if (!(await f.exists())) {
-                                    if (!mounted) return;
-                                    showAppSnackBar(
-                                      context,
-                                      message: l10n
-                                          .chatMessageWidgetFileNotFound(
-                                            d.fileName,
-                                          ),
-                                      type: NotificationType.error,
-                                    );
-                                    return;
-                                  }
-                                  final res = await OpenFilex.open(
-                                    fixed,
-                                    type: d.mime,
-                                  );
-                                  if (res.type != ResultType.done) {
-                                    if (!mounted) return;
-                                    final openMessage = res.message;
-                                    showAppSnackBar(
-                                      context,
-                                      message: l10n
-                                          .chatMessageWidgetCannotOpenFile(
-                                            openMessage.isNotEmpty
-                                                ? openMessage
-                                                : res.type.toString(),
-                                          ),
-                                      type: NotificationType.error,
-                                    );
-                                  }
-                                } catch (e) {
-                                  if (!mounted) return;
-                                  showAppSnackBar(
-                                    context,
-                                    message: l10n
-                                        .chatMessageWidgetOpenFileError(
-                                          e.toString(),
-                                        ),
-                                    type: NotificationType.error,
-                                  );
-                                }
-                              },
-                              child: Ink(
-                                decoration: BoxDecoration(
-                                  color: isDark ? Colors.white12 : cs.surface,
-                                  borderRadius: BorderRadius.circular(10),
-                                ),
-                                child: Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 10,
-                                    vertical: 8,
-                                  ),
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      const Icon(
-                                        Icons.insert_drive_file,
-                                        size: 16,
-                                      ),
-                                      const SizedBox(width: 6),
-                                      ConstrainedBox(
-                                        constraints: const BoxConstraints(
-                                          maxWidth: 180,
-                                        ),
-                                        child: Text(
-                                          d.fileName,
-                                          overflow: TextOverflow.ellipsis,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                            ),
-                          );
-                        }).toList(),
-                      ),
-                    ],
-                  ],
-                ),
+              child: Column(
+                key: ValueKey('user-message-content:${widget.message.id}'),
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  if (mediaPreview != null) mediaPreview,
+                  if (mediaPreview != null && textBubble != null)
+                    const SizedBox(height: 8),
+                  if (textBubble != null) textBubble,
+                ],
               ),
             ),
           ),
@@ -1489,39 +1438,7 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
                             color: cs.onSurface.withValues(alpha: 0.9),
                             onTap: widget.onResend == null
                                 ? null
-                                : () async {
-                                    final ok = await showDialog<bool>(
-                                      context: context,
-                                      builder: (dctx) => AlertDialog(
-                                        backgroundColor: Theme.of(
-                                          dctx,
-                                        ).colorScheme.surface,
-                                        title: Text(
-                                          l10n.chatMessageWidgetRegenerateConfirmTitle,
-                                        ),
-                                        content: Text(
-                                          l10n.chatMessageWidgetRegenerateConfirmContent,
-                                        ),
-                                        actions: [
-                                          TextButton(
-                                            onPressed: () =>
-                                                Navigator.of(dctx).pop(false),
-                                            child: Text(
-                                              l10n.chatMessageWidgetRegenerateConfirmCancel,
-                                            ),
-                                          ),
-                                          TextButton(
-                                            onPressed: () =>
-                                                Navigator.of(dctx).pop(true),
-                                            child: Text(
-                                              l10n.chatMessageWidgetRegenerateConfirmOk,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    );
-                                    if (ok == true) widget.onResend!();
-                                  },
+                                : () => _confirmRegeneration(widget.onResend!),
                           ),
                         ),
                       ),
@@ -1635,11 +1552,12 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
             }
           },
         ),
-        DesktopContextMenuItem(
-          icon: Lucide.Pencil,
-          label: l10n.messageMoreSheetEdit,
-          onTap: () => (widget.onEdit ?? widget.onMore)?.call(),
-        ),
+        if (widget.onEdit != null)
+          DesktopContextMenuItem(
+            icon: Lucide.Pencil,
+            label: l10n.messageMoreSheetEdit,
+            onTap: () => widget.onEdit?.call(),
+          ),
         DesktopContextMenuItem(
           icon: Lucide.Trash2,
           label: l10n.messageMoreSheetDelete,
@@ -1659,6 +1577,225 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
       );
       DesktopMenuAnchor.setPosition(center);
     } catch (_) {}
+  }
+
+  Widget _buildUserTextContent(
+    BuildContext context,
+    String visualText,
+    SettingsProvider settings,
+    ColorScheme cs,
+  ) {
+    final bool isDesktop =
+        defaultTargetPlatform == TargetPlatform.macOS ||
+        defaultTargetPlatform == TargetPlatform.windows ||
+        defaultTargetPlatform == TargetPlatform.linux;
+    final double baseUser = isDesktop ? 14.0 : 15.5;
+
+    Widget content;
+    if (settings.enableUserMarkdown) {
+      content = DefaultTextStyle.merge(
+        style: TextStyle(fontSize: baseUser, height: 1.45),
+        child: MarkdownWithCodeHighlight(
+          text: visualText,
+          baseStyle: TextStyle(fontSize: baseUser, height: 1.45),
+        ),
+      );
+    } else {
+      content = Text(
+        visualText,
+        style: TextStyle(fontSize: baseUser, height: 1.4, color: cs.onSurface),
+      );
+    }
+
+    return isDesktop
+        ? SelectionArea(
+            key: ValueKey('user_${widget.message.id}'),
+            child: content,
+          )
+        : content;
+  }
+
+  Widget? _buildUserAttachmentPreview(
+    BuildContext context, {
+    required _ParsedUserContent parsed,
+    required bool isDark,
+  }) {
+    if (parsed.images.isEmpty && parsed.docs.isEmpty) return null;
+
+    final cs = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context)!;
+    final imageItems = <Widget>[];
+    final docItems = <Widget>[];
+
+    if (parsed.images.isNotEmpty) {
+      final imgs = parsed.images;
+      imageItems.addAll(
+        imgs.asMap().entries.map((entry) {
+          final idx = entry.key;
+          final p = entry.value;
+          return IosCardPress(
+            baseColor: Colors.transparent,
+            pressedScale: 0.985,
+            borderRadius: BorderRadius.circular(10),
+            padding: EdgeInsets.zero,
+            onTap: () {
+              Navigator.of(context).push(
+                PageRouteBuilder(
+                  pageBuilder: (_, __, ___) =>
+                      ImageViewerPage(images: imgs, initialIndex: idx),
+                  transitionDuration: const Duration(milliseconds: 360),
+                  reverseTransitionDuration: const Duration(milliseconds: 280),
+                  transitionsBuilder: (context, anim, sec, child) {
+                    final curved = CurvedAnimation(
+                      parent: anim,
+                      curve: Curves.easeOutCubic,
+                      reverseCurve: Curves.easeInCubic,
+                    );
+                    return FadeTransition(
+                      opacity: curved,
+                      child: SlideTransition(
+                        position: Tween<Offset>(
+                          begin: const Offset(0, 0.02),
+                          end: Offset.zero,
+                        ).animate(curved),
+                        child: child,
+                      ),
+                    );
+                  },
+                ),
+              );
+            },
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: Hero(
+                tag: 'img:$p',
+                child: Image.file(
+                  File(SandboxPathResolver.fix(p)),
+                  width: 112,
+                  height: 112,
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, __, ___) => Container(
+                    width: 112,
+                    height: 112,
+                    color: isDark
+                        ? Colors.white.withValues(alpha: 0.08)
+                        : Colors.black.withValues(alpha: 0.06),
+                    child: Icon(
+                      Icons.broken_image,
+                      color: cs.onSurface.withValues(alpha: 0.45),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+        }),
+      );
+    }
+
+    if (parsed.docs.isNotEmpty) {
+      docItems.addAll(
+        parsed.docs.map((d) {
+          return IosCardPress(
+            baseColor: isDark
+                ? Colors.white.withValues(alpha: 0.08)
+                : cs.surface.withValues(alpha: 0.92),
+            pressedScale: 0.99,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: cs.outlineVariant.withValues(alpha: 0.18),
+            ),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            onTap: () async {
+              try {
+                final fixed = SandboxPathResolver.fix(d.path);
+                final f = File(fixed);
+                if (!(await f.exists())) {
+                  if (!context.mounted) return;
+                  showAppSnackBar(
+                    context,
+                    message: l10n.chatMessageWidgetFileNotFound(d.fileName),
+                    type: NotificationType.error,
+                  );
+                  return;
+                }
+                final res = await OpenFilex.open(fixed, type: d.mime);
+                if (res.type != ResultType.done) {
+                  if (!context.mounted) return;
+                  final openMessage = res.message;
+                  showAppSnackBar(
+                    context,
+                    message: l10n.chatMessageWidgetCannotOpenFile(
+                      openMessage.isNotEmpty
+                          ? openMessage
+                          : res.type.toString(),
+                    ),
+                    type: NotificationType.error,
+                  );
+                }
+              } catch (e) {
+                if (!context.mounted) return;
+                showAppSnackBar(
+                  context,
+                  message: l10n.chatMessageWidgetOpenFileError(e.toString()),
+                  type: NotificationType.error,
+                );
+              }
+            },
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.insert_drive_file,
+                  size: 16,
+                  color: cs.onSurface.withValues(alpha: 0.72),
+                ),
+                const SizedBox(width: 6),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 180),
+                  child: Text(
+                    d.fileName,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: cs.onSurface.withValues(alpha: 0.86),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          );
+        }),
+      );
+    }
+
+    return Align(
+      key: ValueKey('user-message-attachments:${widget.message.id}'),
+      alignment: Alignment.centerRight,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          if (imageItems.isNotEmpty)
+            Wrap(
+              key: ValueKey('user-message-images:${widget.message.id}'),
+              alignment: WrapAlignment.end,
+              spacing: 8,
+              runSpacing: 8,
+              children: imageItems,
+            ),
+          if (imageItems.isNotEmpty && docItems.isNotEmpty)
+            const SizedBox(height: 8),
+          if (docItems.isNotEmpty)
+            Wrap(
+              key: ValueKey('user-message-docs:${widget.message.id}'),
+              alignment: WrapAlignment.end,
+              spacing: 8,
+              runSpacing: 8,
+              children: docItems,
+            ),
+        ],
+      ),
+    );
   }
 
   Widget _buildBubbleContainer({
@@ -1739,6 +1876,7 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
         text: visualContent,
         onCitationTap: (id) => _handleCitationTap(id),
         baseStyle: TextStyle(fontSize: baseAssistant, height: 1.5),
+        streaming: widget.message.isStreaming,
       );
     } else {
       assistantContent = Text(
@@ -1758,6 +1896,7 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
     assistantContent = _StreamingAssistantMessageMotion(
       enabled:
           widget.message.isStreaming &&
+          widget.enableStreamingTextMotion &&
           !reduceMotion &&
           visualContent.isNotEmpty,
       child: assistantContent,
@@ -1765,7 +1904,7 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
 
     return RepaintBoundary(
       child: SelectionArea(
-        key: ValueKey('assistant_${widget.message.id}_$visualContent'),
+        key: ValueKey('assistant_${widget.message.id}'),
         child: DefaultTextStyle.merge(
           style: TextStyle(fontSize: baseAssistant, height: 1.5),
           child: assistantContent,
@@ -1946,16 +2085,9 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
     final settings = context.watch<SettingsProvider>();
     final assistant = _assistantForMessage();
 
-    // Extract vendor inline <think>...</think> content (if present)
-    final extractedThinking = _thinkingRegex
-        .allMatches(widget.message.content)
-        .map((m) => (m.group(1) ?? '').trim())
-        .where((s) => s.isNotEmpty)
-        .join('\n\n');
-    // Remove all <think> blocks from the visible assistant content
-    final contentWithoutThink = extractedThinking.isNotEmpty
-        ? widget.message.content.replaceAll(_thinkingRegex, '').trim()
-        : widget.message.content;
+    final parsedInlineThinking = _legacyInlineThinkingFor(widget);
+    final extractedThinking = parsedInlineThinking.thinkingTexts.join('\n\n');
+    final contentWithoutThink = parsedInlineThinking.visibleContent;
     final visualContent = applyAssistantRegexes(
       contentWithoutThink,
       assistant: assistant,
@@ -1975,6 +2107,7 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
         (translationText != null && translationText.isNotEmpty);
     final bool isTranslating =
         translationText == l10n.chatMessageWidgetTranslating;
+    final searchItems = _allSearchItems();
 
     return Padding(
       padding: EdgeInsets.symmetric(horizontal: 20, vertical: 12),
@@ -2014,7 +2147,7 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
                           fontSize: 13,
-                          fontWeight: FontWeight.w500,
+                          fontWeight: AppFontWeights.medium,
                           color: cs.onSurface.withValues(alpha: 0.7),
                         ),
                       ),
@@ -2067,12 +2200,8 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
             final effectiveExpanded = usingInlineThink
                 ? (_inlineThinkExpanded ?? true)
                 : widget.reasoningExpanded;
-            final collapsedNow =
-                usingInlineThink && (_inlineThinkExpanded == false);
             final effectiveLoading = usingInlineThink
-                ? (widget.message.isStreaming &&
-                      !widget.message.content.contains('</think>') &&
-                      !collapsedNow)
+                ? false
                 : (widget.reasoningFinishedAt == null);
 
             List<ReasoningSegment>? effectiveReasoningSegments =
@@ -2134,7 +2263,12 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
                   _buildAssistantTextBlock(context, block.text!, settings),
                 );
               } else if (block.steps.isNotEmpty) {
-                widgets.add(_ChainOfThoughtCard(steps: block.steps));
+                widgets.add(
+                  _ChainOfThoughtCard(
+                    steps: block.steps,
+                    onRecoveredAnswer: widget.onRecoveredAskUserAnswer,
+                  ),
+                );
               }
               if (i != renderBlocks.length - 1) {
                 widgets.add(const SizedBox(height: 8));
@@ -2193,7 +2327,7 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
                               l10n.chatMessageWidgetTranslation,
                               style: TextStyle(
                                 fontSize: 13,
-                                fontWeight: FontWeight.w700,
+                                fontWeight: AppFontWeights.emphasis,
                                 color: fg.strong,
                               ),
                             ),
@@ -2301,11 +2435,12 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
             ),
           ],
           // Sources summary card (tap to open full citations)
-          if (_latestSearchItems().isNotEmpty) ...[
+          if (searchItems.isNotEmpty) ...[
             const SizedBox(height: 8),
             _SourcesSummaryCard(
-              count: _latestSearchItems().length,
-              onTap: () => _showCitationsSheet(_latestSearchItems()),
+              count: searchItems.length,
+              items: searchItems,
+              onTap: () => _showCitationsSheet(searchItems),
             ),
           ],
           // Action buttons (hidden while generating)
@@ -2315,7 +2450,7 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
             switchOutCurve: Curves.easeInCubic,
             transitionBuilder: (child, anim) => SizeTransition(
               sizeFactor: anim,
-              axisAlignment: -1,
+              alignment: const AlignmentDirectional(-1.0, -1.0),
               child: FadeTransition(opacity: anim, child: child),
             ),
             child: widget.message.isStreaming
@@ -2364,77 +2499,50 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
                               color: cs.onSurface.withValues(alpha: 0.9),
                               onTap: widget.onRegenerate == null
                                   ? null
-                                  : () async {
-                                      final ok = await showDialog<bool>(
-                                        context: context,
-                                        builder: (dctx) => AlertDialog(
-                                          backgroundColor: Theme.of(
-                                            dctx,
-                                          ).colorScheme.surface,
-                                          title: Text(
-                                            l10n.chatMessageWidgetRegenerateConfirmTitle,
-                                          ),
-                                          content: Text(
-                                            l10n.chatMessageWidgetRegenerateConfirmContent,
-                                          ),
-                                          actions: [
-                                            TextButton(
-                                              onPressed: () =>
-                                                  Navigator.of(dctx).pop(false),
-                                              child: Text(
-                                                l10n.chatMessageWidgetRegenerateConfirmCancel,
-                                              ),
-                                            ),
-                                            TextButton(
-                                              onPressed: () =>
-                                                  Navigator.of(dctx).pop(true),
-                                              child: Text(
-                                                l10n.chatMessageWidgetRegenerateConfirmOk,
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      );
-                                      if (ok == true) widget.onRegenerate!();
-                                    },
+                                  : () => _confirmRegeneration(
+                                      widget.onRegenerate!,
+                                    ),
                             ),
                           ),
                         ),
                         const SizedBox(width: 6),
                         Consumer<TtsProvider>(
-                          builder: (context, tts, _) => SizedBox(
-                            width: 28,
-                            height: 28,
-                            child: Center(
-                              child: IosIconButton(
-                                size: 16,
-                                padding: EdgeInsets.all(4),
-                                onTap: widget.onSpeak,
-                                color: cs.onSurface.withValues(alpha: 0.9),
-                                builder: (color) => AnimatedSwitcher(
-                                  duration: const Duration(milliseconds: 200),
-                                  transitionBuilder: (child, anim) =>
-                                      ScaleTransition(
-                                        scale: anim,
-                                        child: FadeTransition(
-                                          opacity: anim,
-                                          child: child,
+                          builder: (context, tts, _) {
+                            final ttsActive = tts.playbackState.isActive;
+                            return SizedBox(
+                              width: 28,
+                              height: 28,
+                              child: Center(
+                                child: IosIconButton(
+                                  size: 16,
+                                  padding: EdgeInsets.all(4),
+                                  onTap: widget.onSpeak,
+                                  color: cs.onSurface.withValues(alpha: 0.9),
+                                  builder: (color) => AnimatedSwitcher(
+                                    duration: const Duration(milliseconds: 200),
+                                    transitionBuilder: (child, anim) =>
+                                        ScaleTransition(
+                                          scale: anim,
+                                          child: FadeTransition(
+                                            opacity: anim,
+                                            child: child,
+                                          ),
                                         ),
+                                    child: Icon(
+                                      ttsActive
+                                          ? Lucide.CircleStop
+                                          : Lucide.Volume2,
+                                      key: ValueKey(
+                                        ttsActive ? 'stop' : 'speak',
                                       ),
-                                  child: Icon(
-                                    tts.isSpeaking
-                                        ? Lucide.CircleStop
-                                        : Lucide.Volume2,
-                                    key: ValueKey(
-                                      tts.isSpeaking ? 'stop' : 'speak',
+                                      size: 16,
+                                      color: color,
                                     ),
-                                    size: 16,
-                                    color: color,
                                   ),
                                 ),
                               ),
-                            ),
-                          ),
+                            );
+                          },
                         ),
                         const SizedBox(width: 6),
                         SizedBox(
@@ -2553,6 +2661,15 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
                     ),
                   ),
           ),
+          if (!widget.message.isStreaming &&
+              widget.suggestions.isNotEmpty &&
+              widget.onSuggestionTap != null) ...[
+            const SizedBox(height: 8),
+            ChatSuggestionBubbles(
+              suggestions: widget.suggestions,
+              onTap: widget.onSuggestionTap!,
+            ),
+          ],
         ],
       ),
     );
@@ -2663,193 +2780,51 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
     return out;
   }
 
-  // Extract items from the last search_web or builtin_search tool result for this assistant message
-  List<Map<String, dynamic>> _latestSearchItems() {
-    final parts = widget.toolParts ?? const <ToolUIPart>[];
-    for (int i = parts.length - 1; i >= 0; i--) {
-      final p = parts[i];
-      if ((p.toolName == 'search_web' || p.toolName == 'builtin_search') &&
-          (p.content?.isNotEmpty ?? false)) {
-        try {
-          final obj = jsonDecode(p.content!) as Map<String, dynamic>;
-          final arr = obj['items'] as List? ?? const <dynamic>[];
-          return [
-            for (final it in arr)
-              if (it is Map) it.cast<String, dynamic>(),
-          ];
-        } catch (_) {
-          return const <Map<String, dynamic>>[];
-        }
-      }
-    }
-    return const <Map<String, dynamic>>[];
+  void _showCitationsSheet(List<Map<String, dynamic>> items) {
+    final l10n = AppLocalizations.of(context)!;
+    final sources = <CitationSourceItem>[
+      for (int i = 0; i < items.length; i++)
+        CitationSourceItem.fromMap(items[i], fallbackIndex: i + 1),
+    ];
+
+    showCitationSourcesBottomSheet(
+      context: context,
+      title: l10n.chatMessageWidgetSearchResultsTitle,
+      closeSemanticLabel: l10n.mcpPageClose,
+      items: sources,
+      onOpen: _openCitationSource,
+    );
   }
 
-  void _showCitationsSheet(List<Map<String, dynamic>> items) {
-    final cs = Theme.of(context).colorScheme;
+  Future<void> _openCitationSource(CitationSourceItem item) async {
     final l10n = AppLocalizations.of(context)!;
-    final bool isDesktop =
-        defaultTargetPlatform == TargetPlatform.macOS ||
-        defaultTargetPlatform == TargetPlatform.windows ||
-        defaultTargetPlatform == TargetPlatform.linux;
-
-    if (isDesktop) {
-      showDialog<void>(
-        context: context,
-        barrierDismissible: true,
-        builder: (ctx) {
-          return Dialog(
-            elevation: 12,
-            insetPadding: const EdgeInsets.symmetric(
-              horizontal: 24,
-              vertical: 24,
-            ),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(16),
-            ),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(
-                minWidth: 380,
-                maxWidth: 460,
-                maxHeight: 360,
-              ),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(16),
-                child: Material(
-                  color: cs.surface,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      // Header
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 12, 8, 8),
-                        child: Row(
-                          children: [
-                            Icon(Lucide.BookOpen, size: 18, color: cs.primary),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                l10n.chatMessageWidgetCitationsTitle(
-                                  items.length,
-                                ),
-                                style: const TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                            ),
-                            Tooltip(
-                              message: l10n.mcpPageClose,
-                              child: IconButton(
-                                icon: Icon(
-                                  Lucide.X,
-                                  size: 18,
-                                  color: cs.onSurface.withValues(alpha: 0.75),
-                                ),
-                                onPressed: () => Navigator.of(ctx).maybePop(),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      // Body
-                      Expanded(
-                        child: Padding(
-                          padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-                          child: SingleChildScrollView(
-                            child: Padding(
-                              padding: const EdgeInsets.only(bottom: 6),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  for (int i = 0; i < items.length; i++)
-                                    _SearchResultCard(
-                                      index: (items[i]['index'] ?? (i + 1))
-                                          .toString(),
-                                      title: (items[i]['title'] ?? '')
-                                          .toString(),
-                                      url: (items[i]['url'] ?? '').toString(),
-                                      text: (items[i]['text'] ?? '').toString(),
-                                    ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          );
-        },
+    final uri = _tryNormalizeExternalUri(item.url);
+    if (uri == null) {
+      showAppSnackBar(
+        context,
+        message: l10n.chatMessageWidgetOpenLinkError,
+        type: NotificationType.error,
       );
       return;
     }
-
-    // Mobile: keep bottom sheet
-    showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: cs.surface,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (ctx) {
-        final bottomInset = MediaQuery.viewInsetsOf(ctx).bottom;
-        return SafeArea(
-          child: FractionallySizedBox(
-            heightFactor: 0.5,
-            child: Padding(
-              padding: EdgeInsets.fromLTRB(16, 16, 16, bottomInset + 16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Icon(Lucide.BookOpen, size: 18, color: cs.primary),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          l10n.chatMessageWidgetCitationsTitle(items.length),
-                          style: const TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  Expanded(
-                    child: SingleChildScrollView(
-                      child: Padding(
-                        padding: const EdgeInsets.only(bottom: 6),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            for (int i = 0; i < items.length; i++)
-                              _SearchResultCard(
-                                index: (items[i]['index'] ?? (i + 1))
-                                    .toString(),
-                                title: (items[i]['title'] ?? '').toString(),
-                                url: (items[i]['url'] ?? '').toString(),
-                                text: (items[i]['text'] ?? '').toString(),
-                              ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
+    try {
+      final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (!mounted) return;
+      if (!ok) {
+        showAppSnackBar(
+          context,
+          message: l10n.chatMessageWidgetCannotOpenUrl(uri.toString()),
+          type: NotificationType.error,
         );
-      },
-    );
+      }
+    } catch (_) {
+      if (!mounted) return;
+      showAppSnackBar(
+        context,
+        message: l10n.chatMessageWidgetOpenLinkError,
+        type: NotificationType.error,
+      );
+    }
   }
 
   Widget _buildAssistantAvatar(ColorScheme cs) {
@@ -2928,7 +2903,10 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
       alignment: Alignment.center,
       child: Text(
         ch,
-        style: TextStyle(color: cs.primary, fontWeight: FontWeight.w700),
+        style: TextStyle(
+          color: cs.primary,
+          fontWeight: AppFontWeights.emphasis,
+        ),
       ),
     );
   }
@@ -3068,7 +3046,9 @@ _ChatSurfaceForegroundPalette _chatSurfaceForegroundPalette(
       medium: cs.secondary.withValues(alpha: 0.9),
       muted: cs.onSurface.withValues(alpha: 0.5),
       body: cs.onSurface.withValues(alpha: 0.7),
-      divider: cs.outline.withValues(alpha: 0.15),
+      divider: theme.brightness == Brightness.dark
+          ? cs.onSurface.withValues(alpha: 0.24)
+          : cs.outline.withValues(alpha: 0.15),
       accent: cs.primary,
     );
   }
@@ -3184,7 +3164,7 @@ class _BranchSelector extends StatelessWidget {
                 style: TextStyle(
                   fontSize: 12,
                   color: cs.onSurface.withValues(alpha: 0.8),
-                  fontWeight: FontWeight.w500,
+                  fontWeight: AppFontWeights.medium,
                 ),
                 maxLines: 1,
                 softWrap: false,
@@ -3309,6 +3289,7 @@ class _StreamingAssistantMessageMotion extends StatelessWidget {
     if (!enabled) return child;
 
     return AnimatedSize(
+      key: const ValueKey('streaming-assistant-message-motion'),
       duration: const Duration(milliseconds: 260),
       curve: Curves.easeOutCubic,
       alignment: Alignment.topLeft,
@@ -3417,14 +3398,13 @@ const double _timelineIconColumnWidth = 24;
 const double _timelineGap = 8;
 const double _timelineLineGap = 3;
 const double _timelineLineX = (_timelineIconColumnWidth - 1) / 2;
-const double _timelineTopLineEnd = _timelineStepPaddingV - _timelineLineGap;
-const double _timelineBottomLineStart =
-    _timelineStepPaddingV + _timelineIconSize + _timelineLineGap;
 
 class _ChainOfThoughtCard extends StatefulWidget {
-  const _ChainOfThoughtCard({required this.steps});
+  const _ChainOfThoughtCard({required this.steps, this.onRecoveredAnswer});
 
   final List<_TimelineStepData> steps;
+  final Future<void> Function(ToolUIPart part, AskUserResult result)?
+  onRecoveredAnswer;
 
   @override
   State<_ChainOfThoughtCard> createState() => _ChainOfThoughtCardState();
@@ -3504,7 +3484,7 @@ class _ChainOfThoughtCardState extends State<_ChainOfThoughtCard> {
                               ),
                         style: TextStyle(
                           fontSize: 13,
-                          fontWeight: FontWeight.w600,
+                          fontWeight: AppFontWeights.semibold,
                           color: fg.strong,
                         ),
                       ),
@@ -3526,6 +3506,7 @@ class _ChainOfThoughtCardState extends State<_ChainOfThoughtCard> {
                 part: step.tool!,
                 isFirst: index == 0,
                 isLast: index == visibleSteps.length - 1,
+                onRecoveredAnswer: widget.onRecoveredAnswer,
               );
             }),
           ],
@@ -3567,14 +3548,14 @@ class _TimelineStepShell extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final fg = _chatSurfaceForegroundPalette(context);
-    final header = Padding(
+    final headerContent = Padding(
       padding: const EdgeInsets.symmetric(vertical: _timelineStepPaddingV),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          SizedBox(
+          const SizedBox(
             width: _timelineIconColumnWidth,
-            child: Center(child: icon),
+            height: _timelineIconSize,
           ),
           const SizedBox(width: _timelineGap),
           Expanded(child: label),
@@ -3584,34 +3565,49 @@ class _TimelineStepShell extends StatelessWidget {
       ),
     );
 
-    return Stack(
-      clipBehavior: Clip.none,
+    final header = Stack(
       children: [
-        if (!isFirst)
-          Positioned(
-            left: _timelineLineX,
-            top: 0,
-            height: _timelineTopLineEnd,
-            child: Container(width: 1, color: fg.divider),
+        headerContent,
+        Positioned(
+          left: 0,
+          top: 0,
+          bottom: 0,
+          width: _timelineIconColumnWidth,
+          child: _TimelineIconColumn(
+            icon: icon,
+            isFirst: isFirst,
+            isLast: isLast,
+            lineColor: fg.divider,
           ),
-        if (!isLast)
-          Positioned(
-            left: _timelineLineX,
-            top: _timelineBottomLineStart,
-            bottom: 0,
-            child: Container(width: 1, color: fg.divider),
-          ),
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        ),
+      ],
+    );
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        IosCardPress(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(12),
+          baseColor: Colors.transparent,
+          pressedScale: 1,
+          padding: const EdgeInsets.symmetric(horizontal: 0, vertical: 0),
+          child: header,
+        ),
+        Stack(
+          clipBehavior: Clip.none,
           children: [
-            IosCardPress(
-              onTap: onTap,
-              borderRadius: BorderRadius.circular(12),
-              baseColor: Colors.transparent,
-              pressedScale: 1,
-              padding: const EdgeInsets.symmetric(horizontal: 0, vertical: 0),
-              child: header,
-            ),
+            if (!isLast)
+              Positioned(
+                left: _timelineLineX,
+                top: 0,
+                bottom: 0,
+                child: SizedBox(
+                  key: const ValueKey('chatMessageTimelineContentLine'),
+                  width: 1,
+                  child: ColoredBox(color: fg.divider),
+                ),
+              ),
             AnimatedSize(
               duration: const Duration(milliseconds: 300),
               curve: const Cubic(0.2, 0.8, 0.2, 1),
@@ -3628,6 +3624,60 @@ class _TimelineStepShell extends StatelessWidget {
                   : const SizedBox.shrink(),
             ),
           ],
+        ),
+      ],
+    );
+  }
+}
+
+class _TimelineIconColumn extends StatelessWidget {
+  const _TimelineIconColumn({
+    required this.icon,
+    required this.isFirst,
+    required this.isLast,
+    required this.lineColor,
+  });
+
+  final Widget icon;
+  final bool isFirst;
+  final bool isLast;
+  final Color lineColor;
+
+  Widget _lineSegment({required bool visible, required Key key}) {
+    if (!visible) return const Expanded(child: SizedBox.expand());
+    return Expanded(
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SizedBox(
+            key: key,
+            width: 1,
+            child: ColoredBox(color: lineColor),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        _lineSegment(
+          visible: !isFirst,
+          key: const ValueKey('chatMessageTimelineHeaderTopLine'),
+        ),
+        const SizedBox(height: _timelineLineGap),
+        SizedBox(
+          width: _timelineIconColumnWidth,
+          height: _timelineIconSize,
+          child: Center(child: icon),
+        ),
+        const SizedBox(height: _timelineLineGap),
+        _lineSegment(
+          visible: !isLast,
+          key: const ValueKey('chatMessageTimelineHeaderBottomLine'),
         ),
       ],
     );
@@ -3743,7 +3793,7 @@ class _ChainOfThoughtReasoningStepState
             l10n.chatMessageWidgetDeepThinking,
             style: TextStyle(
               fontSize: 13,
-              fontWeight: FontWeight.w600,
+              fontWeight: AppFontWeights.semibold,
               color: fg.strong,
             ),
           ),
@@ -3780,13 +3830,14 @@ class _ChainOfThoughtReasoningStepState
         return RepaintBoundary(
           child: MarkdownWithCodeHighlight(
             text: text.isNotEmpty ? text : '…',
-            baseStyle: const TextStyle(fontSize: 12.5, height: 1.32),
+            baseStyle: TextStyle(fontSize: 12.5, height: 1.32),
+            streaming: widget.step.loading,
           ),
         );
       }
       return Text(
         text.isNotEmpty ? text : '…',
-        style: const TextStyle(fontSize: 12.5, height: 1.32),
+        style: TextStyle(fontSize: 12.5, height: 1.32),
       );
     }
 
@@ -3857,11 +3908,14 @@ class _ChainOfThoughtToolStep extends StatefulWidget {
     required this.part,
     required this.isFirst,
     required this.isLast,
+    this.onRecoveredAnswer,
   });
 
   final ToolUIPart part;
   final bool isFirst;
   final bool isLast;
+  final Future<void> Function(ToolUIPart part, AskUserResult result)?
+  onRecoveredAnswer;
 
   @override
   State<_ChainOfThoughtToolStep> createState() =>
@@ -3869,21 +3923,25 @@ class _ChainOfThoughtToolStep extends StatefulWidget {
 }
 
 class _ChainOfThoughtToolStepState extends State<_ChainOfThoughtToolStep> {
-  IconData _iconFor(String name) {
-    switch (name) {
-      case 'create_memory':
-        return Lucide.bookHeart;
-      case 'edit_memory':
-        return Lucide.bookHeart;
-      case 'delete_memory':
-        return Lucide.bookDashed;
-      case 'search_web':
-        return Lucide.Earth;
-      case 'builtin_search':
-        return Lucide.Search;
-      default:
-        return Lucide.Wrench;
+  bool get _isAskUser => widget.part.toolName == LocalToolNames.askUser;
+  bool? _askUserExpanded;
+
+  bool get _askUserAnswered =>
+      widget.part.content?.trim().isNotEmpty == true && !widget.part.loading;
+
+  @override
+  void didUpdateWidget(covariant _ChainOfThoughtToolStep oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final wasAnswered =
+        oldWidget.part.content?.trim().isNotEmpty == true &&
+        !oldWidget.part.loading;
+    if (_isAskUser && !wasAnswered && _askUserAnswered) {
+      _askUserExpanded = true;
     }
+  }
+
+  IconData _iconFor(String name, Map<String, dynamic> args) {
+    return _toolIconFor(name, args);
   }
 
   String _titleFor(
@@ -3892,24 +3950,7 @@ class _ChainOfThoughtToolStepState extends State<_ChainOfThoughtToolStep> {
     Map<String, dynamic> args, {
     required bool isResult,
   }) {
-    final l10n = AppLocalizations.of(context)!;
-    switch (name) {
-      case 'create_memory':
-        return l10n.chatMessageWidgetCreateMemory;
-      case 'edit_memory':
-        return l10n.chatMessageWidgetEditMemory;
-      case 'delete_memory':
-        return l10n.chatMessageWidgetDeleteMemory;
-      case 'search_web':
-        final q = (args['query'] ?? '').toString();
-        return l10n.chatMessageWidgetWebSearch(q);
-      case 'builtin_search':
-        return l10n.chatMessageWidgetBuiltinSearch;
-      default:
-        return isResult
-            ? l10n.chatMessageWidgetToolResult(name)
-            : l10n.chatMessageWidgetToolCall(name);
-    }
+    return _toolTitleFor(context, name, args, isResult: isResult);
   }
 
   String _argsSummary(Map<String, dynamic> args) {
@@ -3986,9 +4027,19 @@ class _ChainOfThoughtToolStepState extends State<_ChainOfThoughtToolStep> {
     final isPendingApproval = pendingRequest != null;
     final approvalRequest = pendingRequest;
 
-    final icon = widget.part.loading && !isPendingApproval
+    final icon = _isAskUser
+        ? Icon(
+            _iconFor(widget.part.toolName, widget.part.arguments),
+            size: 16,
+            color: fg.strong,
+          )
+        : widget.part.loading && !isPendingApproval
         ? LoadingIndicator(height: 12, dotSize: 3, spacing: 2, color: fg.strong)
-        : Icon(_iconFor(widget.part.toolName), size: 16, color: fg.strong);
+        : Icon(
+            _iconFor(widget.part.toolName, widget.part.arguments),
+            size: 16,
+            color: fg.strong,
+          );
 
     final title = _titleFor(
       context,
@@ -3997,14 +4048,14 @@ class _ChainOfThoughtToolStepState extends State<_ChainOfThoughtToolStep> {
       isResult: !widget.part.loading && !isPendingApproval,
     );
     final label = _Shimmer(
-      enabled: widget.part.loading,
+      enabled: widget.part.loading && !_isAskUser,
       child: Text(
         title,
         maxLines: 2,
         overflow: TextOverflow.ellipsis,
         style: TextStyle(
           fontSize: 13,
-          fontWeight: FontWeight.w600,
+          fontWeight: AppFontWeights.semibold,
           color: fg.strong,
         ),
       ),
@@ -4021,7 +4072,24 @@ class _ChainOfThoughtToolStepState extends State<_ChainOfThoughtToolStep> {
                   '')
               .toString();
     final bool shouldShowSummary = settings.showToolResultSummary;
-    final Widget? content = !shouldShowSummary || summaryText.trim().isEmpty
+    final askUserExpanded = _askUserExpanded ?? true;
+    final ttsText = widget.part.toolName == LocalToolNames.textToSpeech
+        ? _textToSpeechToolText(widget.part.arguments)
+        : '';
+    final Widget? content = _isAskUser
+        ? _AskUserInlineBody(
+            part: widget.part,
+            compact: true,
+            onRecoveredAnswer: widget.onRecoveredAnswer,
+          )
+        : ttsText.isNotEmpty
+        ? _buildTextToSpeechReplayRow(
+            context,
+            text: ttsText,
+            textColor: fg.body,
+            buttonColor: fg.accent,
+          )
+        : !shouldShowSummary || summaryText.trim().isEmpty
         ? null
         : Text(
             summaryText.trim(),
@@ -4072,18 +4140,28 @@ class _ChainOfThoughtToolStepState extends State<_ChainOfThoughtToolStep> {
       label: label,
       isFirst: widget.isFirst,
       isLast: widget.isLast,
-      onTap: () => _showDetail(context),
+      onTap: _isAskUser
+          ? () => setState(() => _askUserExpanded = !askUserExpanded)
+          : () => _showDetail(context),
       extra: extra,
-      indicator: Icon(Lucide.ChevronRight, size: 16, color: fg.muted),
+      indicator: _isAskUser
+          ? Icon(
+              askUserExpanded ? Lucide.ChevronUp : Lucide.ChevronDown,
+              size: 16,
+              color: fg.muted,
+            )
+          : Icon(Lucide.ChevronRight, size: 16, color: fg.muted),
       content: content,
-      contentVisible: content != null,
+      contentVisible: content != null && (!_isAskUser || askUserExpanded),
     );
   }
 }
 
 class _ToolCallItem extends StatefulWidget {
-  const _ToolCallItem({required this.part});
+  const _ToolCallItem({required this.part, this.onRecoveredAnswer});
   final ToolUIPart part;
+  final Future<void> Function(ToolUIPart part, AskUserResult result)?
+  onRecoveredAnswer;
 
   @override
   State<_ToolCallItem> createState() => _ToolCallItemState();
@@ -4154,21 +4232,8 @@ class _ToolCallItemState extends State<_ToolCallItem> {
     }
   }
 
-  IconData _iconFor(String name) {
-    switch (name) {
-      case 'create_memory':
-        return Lucide.bookHeart;
-      case 'edit_memory':
-        return Lucide.bookHeart;
-      case 'delete_memory':
-        return Lucide.bookDashed;
-      case 'search_web':
-        return Lucide.Earth;
-      case 'builtin_search':
-        return Lucide.Search;
-      default:
-        return Lucide.Wrench;
-    }
+  IconData _iconFor(String name, Map<String, dynamic> args) {
+    return _toolIconFor(name, args);
   }
 
   String _titleFor(
@@ -4177,24 +4242,7 @@ class _ToolCallItemState extends State<_ToolCallItem> {
     Map<String, dynamic> args, {
     required bool isResult,
   }) {
-    final l10n = AppLocalizations.of(context)!;
-    switch (name) {
-      case 'create_memory':
-        return l10n.chatMessageWidgetCreateMemory;
-      case 'edit_memory':
-        return l10n.chatMessageWidgetEditMemory;
-      case 'delete_memory':
-        return l10n.chatMessageWidgetDeleteMemory;
-      case 'search_web':
-        final q = (args['query'] ?? '').toString();
-        return l10n.chatMessageWidgetWebSearch(q);
-      case 'builtin_search':
-        return l10n.chatMessageWidgetBuiltinSearch;
-      default:
-        return isResult
-            ? l10n.chatMessageWidgetToolResult(name)
-            : l10n.chatMessageWidgetToolCall(name);
-    }
+    return _toolTitleFor(context, name, args, isResult: isResult);
   }
 
   /// Build a short argument summary for display in the approval card.
@@ -4217,6 +4265,16 @@ class _ToolCallItemState extends State<_ToolCallItem> {
     final fg = _chatSurfaceForegroundPalette(context);
     final hasImages = _imagePaths.isNotEmpty;
     final l10n = AppLocalizations.of(context)!;
+    final ttsText = widget.part.toolName == LocalToolNames.textToSpeech
+        ? _textToSpeechToolText(widget.part.arguments)
+        : '';
+
+    if (widget.part.toolName == LocalToolNames.askUser) {
+      return _AskUserToolCard(
+        part: widget.part,
+        onRecoveredAnswer: widget.onRecoveredAnswer,
+      );
+    }
 
     // Check if this tool call is pending approval
     final approvalService = context.watch<ToolApprovalService>();
@@ -4280,7 +4338,7 @@ class _ToolCallItemState extends State<_ToolCallItem> {
                     height: 18,
                     child: Center(
                       child: Icon(
-                        _iconFor(widget.part.toolName),
+                        _iconFor(widget.part.toolName, widget.part.arguments),
                         size: 18,
                         color: fg.strong,
                       ),
@@ -4301,7 +4359,7 @@ class _ToolCallItemState extends State<_ToolCallItem> {
                         ),
                         style: TextStyle(
                           fontSize: 13,
-                          fontWeight: FontWeight.w700,
+                          fontWeight: AppFontWeights.emphasis,
                           color: isPendingApproval ? fg.accent : fg.strong,
                         ),
                       ),
@@ -4312,7 +4370,7 @@ class _ToolCallItemState extends State<_ToolCallItem> {
                           l10n.toolApprovalPending,
                           style: TextStyle(
                             fontSize: 11,
-                            fontWeight: FontWeight.w500,
+                            fontWeight: AppFontWeights.medium,
                             color: fg.medium,
                           ),
                         ),
@@ -4322,6 +4380,15 @@ class _ToolCallItemState extends State<_ToolCallItem> {
                 ),
               ],
             ),
+            if (ttsText.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              _buildTextToSpeechReplayRow(
+                context,
+                text: ttsText,
+                textColor: fg.body,
+                buttonColor: fg.accent,
+              ),
+            ],
             // Argument summary so users know what the tool is about to do
             if (isPendingApproval && widget.part.arguments.isNotEmpty) ...[
               const SizedBox(height: 8),
@@ -4500,7 +4567,10 @@ class _ToolCallItemState extends State<_ToolCallItem> {
                         child: Row(
                           children: [
                             Icon(
-                              _iconFor(widget.part.toolName),
+                              _iconFor(
+                                widget.part.toolName,
+                                widget.part.arguments,
+                              ),
                               size: 18,
                               color: cs.primary,
                             ),
@@ -4513,9 +4583,9 @@ class _ToolCallItemState extends State<_ToolCallItem> {
                                   widget.part.arguments,
                                   isResult: !widget.part.loading,
                                 ),
-                                style: const TextStyle(
+                                style: TextStyle(
                                   fontSize: 16,
-                                  fontWeight: FontWeight.w700,
+                                  fontWeight: AppFontWeights.emphasis,
                                 ),
                                 maxLines: 2,
                                 overflow: TextOverflow.ellipsis,
@@ -4570,7 +4640,7 @@ class _ToolCallItemState extends State<_ToolCallItem> {
                                   ),
                                   child: SelectableText(
                                     argsPretty,
-                                    style: const TextStyle(fontSize: 12),
+                                    style: TextStyle(fontSize: 12),
                                   ),
                                 ),
                                 const SizedBox(height: 12),
@@ -4600,7 +4670,7 @@ class _ToolCallItemState extends State<_ToolCallItem> {
                                   ),
                                   child: SelectableText(
                                     resultText,
-                                    style: const TextStyle(fontSize: 12),
+                                    style: TextStyle(fontSize: 12),
                                   ),
                                 ),
                                 // Show images if available
@@ -4674,7 +4744,7 @@ class _ToolCallItemState extends State<_ToolCallItem> {
                     Row(
                       children: [
                         Icon(
-                          _iconFor(widget.part.toolName),
+                          _iconFor(widget.part.toolName, widget.part.arguments),
                           size: 18,
                           color: cs.primary,
                         ),
@@ -4687,9 +4757,9 @@ class _ToolCallItemState extends State<_ToolCallItem> {
                               widget.part.arguments,
                               isResult: !widget.part.loading,
                             ),
-                            style: const TextStyle(
+                            style: TextStyle(
                               fontSize: 16,
-                              fontWeight: FontWeight.w700,
+                              fontWeight: AppFontWeights.emphasis,
                             ),
                           ),
                         ),
@@ -4718,7 +4788,7 @@ class _ToolCallItemState extends State<_ToolCallItem> {
                       ),
                       child: SelectableText(
                         argsPretty,
-                        style: const TextStyle(fontSize: 12),
+                        style: TextStyle(fontSize: 12),
                       ),
                     ),
                     const SizedBox(height: 12),
@@ -4744,7 +4814,7 @@ class _ToolCallItemState extends State<_ToolCallItem> {
                       ),
                       child: SelectableText(
                         resultText,
-                        style: const TextStyle(fontSize: 12),
+                        style: TextStyle(fontSize: 12),
                       ),
                     ),
                     // Show images if available
@@ -4813,6 +4883,762 @@ class _ToolCallItemState extends State<_ToolCallItem> {
   }
 }
 
+class _AskUserToolCard extends StatefulWidget {
+  const _AskUserToolCard({required this.part, this.onRecoveredAnswer});
+
+  final ToolUIPart part;
+  final Future<void> Function(ToolUIPart part, AskUserResult result)?
+  onRecoveredAnswer;
+
+  @override
+  State<_AskUserToolCard> createState() => _AskUserToolCardState();
+}
+
+class _AskUserToolCardState extends State<_AskUserToolCard> {
+  bool? _expanded;
+
+  bool get _answered =>
+      widget.part.content?.trim().isNotEmpty == true && !widget.part.loading;
+
+  @override
+  void didUpdateWidget(covariant _AskUserToolCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final wasAnswered =
+        oldWidget.part.content?.trim().isNotEmpty == true &&
+        !oldWidget.part.loading;
+    if (!wasAnswered && _answered) {
+      _expanded = true;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final fg = _chatSurfaceForegroundPalette(context);
+    final l10n = AppLocalizations.of(context)!;
+    final expanded = _expanded ?? true;
+    return _buildSharedChatSurface(
+      context,
+      borderRadius: BorderRadius.circular(16),
+      padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
+      defaultColor: cs.primaryContainer.withValues(alpha: isDark ? 0.25 : 0.30),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          IosCardPress(
+            onTap: () => setState(() => _expanded = !expanded),
+            borderRadius: BorderRadius.circular(10),
+            baseColor: Colors.transparent,
+            pressedScale: 1,
+            padding: EdgeInsets.zero,
+            child: Row(
+              children: [
+                Icon(
+                  Lucide.MessageCircleQuestionMark,
+                  size: 18,
+                  color: fg.strong,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    _askUserToolTitleFor(l10n, widget.part.arguments),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: AppFontWeights.emphasis,
+                      color: fg.strong,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                if (_answered) ...[
+                  Text(
+                    l10n.askUserCardAnswered,
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: AppFontWeights.emphasis,
+                      color: fg.muted,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                ],
+                Icon(
+                  expanded ? Lucide.ChevronUp : Lucide.ChevronDown,
+                  size: 16,
+                  color: fg.muted,
+                ),
+              ],
+            ),
+          ),
+          AnimatedSize(
+            duration: const Duration(milliseconds: 240),
+            curve: Curves.easeOutCubic,
+            alignment: Alignment.topLeft,
+            child: expanded
+                ? Padding(
+                    padding: const EdgeInsets.only(top: 12),
+                    child: _AskUserInlineBody(
+                      part: widget.part,
+                      onRecoveredAnswer: widget.onRecoveredAnswer,
+                    ),
+                  )
+                : const SizedBox.shrink(),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AskUserInlineBody extends StatefulWidget {
+  const _AskUserInlineBody({
+    required this.part,
+    this.compact = false,
+    this.onRecoveredAnswer,
+  });
+
+  final ToolUIPart part;
+  final bool compact;
+  final Future<void> Function(ToolUIPart part, AskUserResult result)?
+  onRecoveredAnswer;
+
+  @override
+  State<_AskUserInlineBody> createState() => _AskUserInlineBodyState();
+}
+
+class _AskUserInlineBodyState extends State<_AskUserInlineBody> {
+  final Map<String, String> _singleAnswers = <String, String>{};
+  final Map<String, Set<String>> _multiAnswers = <String, Set<String>>{};
+  final Map<String, TextEditingController> _textControllers =
+      <String, TextEditingController>{};
+  final Set<String> _skippedQuestions = <String>{};
+  bool _submittingRecovered = false;
+
+  @override
+  void dispose() {
+    for (final controller in _textControllers.values) {
+      controller.dispose();
+    }
+    super.dispose();
+  }
+
+  TextEditingController _controllerFor(String id) {
+    return _textControllers.putIfAbsent(id, TextEditingController.new);
+  }
+
+  bool _hasAnswer(AskUserQuestion question) {
+    if (_skippedQuestions.contains(question.id)) return true;
+    final textValue = _controllerFor(question.id).text.trim();
+    if (textValue.isNotEmpty) return true;
+    return switch (question.kind) {
+      AskUserQuestionKind.single =>
+        (_singleAnswers[question.id] ?? '').trim().isNotEmpty,
+      AskUserQuestionKind.multi =>
+        (_multiAnswers[question.id] ?? const <String>{}).isNotEmpty,
+    };
+  }
+
+  bool _canSubmit(List<AskUserQuestion> questions) {
+    return questions.isNotEmpty && questions.every(_hasAnswer);
+  }
+
+  Map<String, AskUserAnswerValue> _buildAnswers(
+    List<AskUserQuestion> questions,
+  ) {
+    final out = <String, AskUserAnswerValue>{};
+    for (final question in questions) {
+      if (_skippedQuestions.contains(question.id)) {
+        out[question.id] = AskUserAnswerValue.skipped(kind: question.kind);
+        continue;
+      }
+      final textValue = _controllerFor(question.id).text.trim();
+      switch (question.kind) {
+        case AskUserQuestionKind.single:
+          final selected = _singleAnswers[question.id] ?? '';
+          if (textValue.isNotEmpty && textValue != selected) {
+            out[question.id] = AskUserAnswerValue.single(
+              value: textValue,
+              custom: true,
+            );
+            break;
+          }
+          out[question.id] = AskUserAnswerValue.single(
+            value: selected,
+            custom: false,
+          );
+          break;
+        case AskUserQuestionKind.multi:
+          final selectedValues =
+              (_multiAnswers[question.id] ?? const <String>{}).toList();
+          if (textValue.isNotEmpty && !selectedValues.contains(textValue)) {
+            selectedValues.add(textValue);
+            out[question.id] = AskUserAnswerValue.multi(
+              value: selectedValues,
+              custom: true,
+            );
+            break;
+          }
+          out[question.id] = AskUserAnswerValue.multi(
+            value: selectedValues,
+            custom: false,
+          );
+          break;
+      }
+    }
+    return out;
+  }
+
+  String _answerLabel(
+    BuildContext context,
+    AskUserQuestion question,
+    Map<dynamic, dynamic> answers,
+  ) {
+    final l10n = AppLocalizations.of(context)!;
+    final raw = answers[question.id];
+    if (raw is! Map) return '';
+    if (raw['skipped'] == true) return l10n.askUserCardSkipped;
+    final value = raw['value'];
+    if (value is List) {
+      return value.map((item) => item.toString()).join(', ');
+    }
+    return value?.toString() ?? '';
+  }
+
+  Map<dynamic, dynamic> _answeredValues(String content) {
+    try {
+      final payload = jsonDecode(content) as Map<String, dynamic>;
+      final answers = payload['answers'];
+      if (answers is Map) return answers;
+    } catch (_) {}
+    return const <dynamic, dynamic>{};
+  }
+
+  void _clearSkip(String questionId) {
+    _skippedQuestions.remove(questionId);
+  }
+
+  Future<void> _submitAnswers(
+    AskUserInteractionService askUserService,
+    List<AskUserQuestion> questions,
+    AskUserRequest? pendingRequest,
+  ) async {
+    final answers = _buildAnswers(questions);
+    if (pendingRequest != null) {
+      askUserService.answer(widget.part.id, answers);
+      return;
+    }
+
+    final onRecoveredAnswer = widget.onRecoveredAnswer;
+    if (onRecoveredAnswer == null || _submittingRecovered) return;
+    setState(() => _submittingRecovered = true);
+    try {
+      await onRecoveredAnswer(widget.part, AskUserResult.answer(answers));
+    } finally {
+      if (mounted) setState(() => _submittingRecovered = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final fg = _chatSurfaceForegroundPalette(context);
+    final l10n = AppLocalizations.of(context)!;
+    final cs = Theme.of(context).colorScheme;
+    final askUserService = context.watch<AskUserInteractionService>();
+    final pendingRequest = askUserService.pendingRequests[widget.part.id];
+    final storedQuestions = AskUserInteractionService.normalizeQuestions(
+      widget.part.arguments,
+    );
+    final questions = pendingRequest?.questions ?? storedQuestions;
+    final answered = widget.part.content?.trim().isNotEmpty == true;
+    final invalid = questions.isEmpty && !answered;
+    final answeredValues = answered
+        ? _answeredValues(widget.part.content ?? '')
+        : const <dynamic, dynamic>{};
+
+    final children = <Widget>[
+      if (invalid)
+        Text(
+          l10n.askUserCardInactive,
+          style: TextStyle(fontSize: 12, height: 1.35, color: fg.body),
+        )
+      else if (answered)
+        for (final question in questions) ...[
+          _AskUserAnsweredQuestion(
+            question: question,
+            answer: _answerLabel(context, question, answeredValues),
+          ),
+          if (question != questions.last) const SizedBox(height: 10),
+        ]
+      else ...[
+        for (final question in questions) ...[
+          _AskUserQuestionView(
+            question: question,
+            selectedSingle: _singleAnswers[question.id],
+            selectedMulti: _multiAnswers[question.id] ?? const <String>{},
+            textController: _controllerFor(question.id),
+            skipped: _skippedQuestions.contains(question.id),
+            showQuestionText: true,
+            onOtherChanged: (value) {
+              setState(() {
+                _clearSkip(question.id);
+                if (question.kind == AskUserQuestionKind.single &&
+                    value.trim().isNotEmpty) {
+                  _singleAnswers.remove(question.id);
+                }
+              });
+            },
+            onSelectSingle: (value) {
+              setState(() {
+                _clearSkip(question.id);
+                _singleAnswers[question.id] = value;
+                _controllerFor(question.id).clear();
+              });
+            },
+            onToggleMulti: (value) {
+              setState(() {
+                _clearSkip(question.id);
+                final set = _multiAnswers[question.id]?.toSet() ?? <String>{};
+                if (set.contains(value)) {
+                  set.remove(value);
+                } else {
+                  set.add(value);
+                }
+                _multiAnswers[question.id] = set;
+              });
+            },
+            onToggleSkip: () {
+              setState(() {
+                if (_skippedQuestions.contains(question.id)) {
+                  _skippedQuestions.remove(question.id);
+                } else {
+                  _singleAnswers.remove(question.id);
+                  _multiAnswers.remove(question.id);
+                  _controllerFor(question.id).clear();
+                  _skippedQuestions.add(question.id);
+                }
+              });
+            },
+          ),
+          const SizedBox(height: 12),
+        ],
+        Align(
+          alignment: Alignment.centerRight,
+          child: _AskUserSubmitButton(
+            label: l10n.askUserCardSubmit,
+            color: cs.primary,
+            onTap:
+                _canSubmit(questions) &&
+                    !_submittingRecovered &&
+                    (pendingRequest != null || widget.onRecoveredAnswer != null)
+                ? () =>
+                      _submitAnswers(askUserService, questions, pendingRequest)
+                : null,
+          ),
+        ),
+      ],
+    ];
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: children,
+    );
+  }
+}
+
+class _AskUserQuestionView extends StatelessWidget {
+  const _AskUserQuestionView({
+    required this.question,
+    required this.selectedSingle,
+    required this.selectedMulti,
+    required this.textController,
+    required this.skipped,
+    required this.showQuestionText,
+    required this.onOtherChanged,
+    required this.onSelectSingle,
+    required this.onToggleMulti,
+    required this.onToggleSkip,
+  });
+
+  final AskUserQuestion question;
+  final String? selectedSingle;
+  final Set<String> selectedMulti;
+  final TextEditingController textController;
+  final bool skipped;
+  final bool showQuestionText;
+  final ValueChanged<String> onOtherChanged;
+  final ValueChanged<String> onSelectSingle;
+  final ValueChanged<String> onToggleMulti;
+  final VoidCallback onToggleSkip;
+
+  @override
+  Widget build(BuildContext context) {
+    final fg = _chatSurfaceForegroundPalette(context);
+    final isMulti = question.kind == AskUserQuestionKind.multi;
+    final questionText = Text(
+      question.question,
+      style: TextStyle(fontSize: 13, height: 1.35, color: fg.body),
+    );
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Expanded(child: showQuestionText ? questionText : const SizedBox()),
+            const SizedBox(width: 8),
+            _AskUserSkipPill(selected: skipped, onTap: onToggleSkip),
+          ],
+        ),
+        const SizedBox(height: 8),
+        if (question.options.isNotEmpty) ...[
+          for (final entry in question.options.asMap().entries) ...[
+            _AskUserOptionRow(
+              index: entry.key + 1,
+              label: entry.value,
+              multi: isMulti,
+              selected: isMulti
+                  ? selectedMulti.contains(entry.value)
+                  : selectedSingle == entry.value,
+              disabled: skipped,
+              onTap: () => isMulti
+                  ? onToggleMulti(entry.value)
+                  : onSelectSingle(entry.value),
+            ),
+            const SizedBox(height: 7),
+          ],
+        ],
+        _AskUserOtherRow(
+          index: question.options.length + 1,
+          multi: isMulti,
+          selected: textController.text.trim().isNotEmpty,
+          controller: textController,
+          disabled: skipped,
+          onChanged: onOtherChanged,
+        ),
+      ],
+    );
+  }
+}
+
+class _AskUserAnsweredQuestion extends StatelessWidget {
+  const _AskUserAnsweredQuestion({
+    required this.question,
+    required this.answer,
+  });
+
+  final AskUserQuestion question;
+  final String answer;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final fg = _chatSurfaceForegroundPalette(context);
+    final displayAnswer = answer.trim().isEmpty
+        ? AppLocalizations.of(context)!.askUserCardSkipped
+        : answer.trim();
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            question.question,
+            style: TextStyle(
+              fontSize: 12.5,
+              height: 1.35,
+              color: fg.body,
+              fontWeight: AppFontWeights.semibold,
+            ),
+          ),
+          const SizedBox(height: 3),
+          Text(
+            displayAnswer,
+            style: TextStyle(
+              fontSize: 13,
+              height: 1.35,
+              color: cs.primary.withValues(alpha: 0.86),
+              fontWeight: AppFontWeights.semibold,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AskUserOptionRow extends StatelessWidget {
+  const _AskUserOptionRow({
+    required this.index,
+    required this.label,
+    required this.multi,
+    required this.selected,
+    required this.disabled,
+    required this.onTap,
+  });
+
+  final int index;
+  final String label;
+  final bool multi;
+  final bool selected;
+  final bool disabled;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final fg = _chatSurfaceForegroundPalette(context);
+    final bg = selected
+        ? cs.primary.withValues(alpha: 0.09)
+        : Colors.transparent;
+    return IosCardPress(
+      borderRadius: BorderRadius.circular(14),
+      baseColor: bg,
+      pressedScale: disabled ? 1 : 0.995,
+      padding: EdgeInsets.zero,
+      onTap: disabled ? null : onTap,
+      child: Container(
+        width: double.infinity,
+        constraints: const BoxConstraints(minHeight: 40),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(14),
+          color: bg,
+        ),
+        child: Row(
+          children: [
+            if (multi)
+              IosCheckbox(
+                value: selected,
+                onChanged: disabled ? null : (_) => onTap(),
+                size: 18,
+                hitTestSize: 24,
+                activeColor: cs.primary,
+                semanticLabel: label,
+              )
+            else
+              _AskUserIndexBadge(index: index, selected: selected),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                label,
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 13,
+                  height: 1.25,
+                  fontWeight: AppFontWeights.medium,
+                  color: selected ? cs.primary : fg.strong,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AskUserOtherRow extends StatelessWidget {
+  const _AskUserOtherRow({
+    required this.index,
+    required this.multi,
+    required this.selected,
+    required this.controller,
+    required this.disabled,
+    required this.onChanged,
+  });
+
+  final int index;
+  final bool multi;
+  final bool selected;
+  final TextEditingController controller;
+  final bool disabled;
+  final ValueChanged<String> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final fg = _chatSurfaceForegroundPalette(context);
+    final l10n = AppLocalizations.of(context)!;
+    final effectiveSelected = selected;
+    final bg = effectiveSelected
+        ? cs.primary.withValues(alpha: 0.09)
+        : Colors.transparent;
+    return Container(
+      width: double.infinity,
+      constraints: const BoxConstraints(minHeight: 40),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          if (multi)
+            IgnorePointer(
+              child: IosCheckbox(
+                value: effectiveSelected,
+                onChanged: disabled ? null : (_) {},
+                size: 18,
+                hitTestSize: 24,
+                activeColor: cs.primary,
+                semanticLabel: l10n.askUserCardSomethingElse,
+              ),
+            )
+          else
+            _AskUserIndexBadge(index: index, selected: effectiveSelected),
+          const SizedBox(width: 10),
+          Expanded(
+            child: TextField(
+              enabled: !disabled,
+              controller: controller,
+              minLines: 1,
+              maxLines: 2,
+              onChanged: onChanged,
+              decoration: InputDecoration(
+                hintText: l10n.askUserCardCustomHint,
+                isDense: true,
+                border: InputBorder.none,
+                contentPadding: EdgeInsets.zero,
+              ),
+              style: TextStyle(fontSize: 13, height: 1.25, color: fg.strong),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AskUserIndexBadge extends StatelessWidget {
+  const _AskUserIndexBadge({required this.index, required this.selected});
+
+  final int index;
+  final bool selected;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final fg = _chatSurfaceForegroundPalette(context);
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    return Container(
+      width: 24,
+      height: 24,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: selected
+            ? cs.primary.withValues(alpha: 0.13)
+            : cs.onSurface.withValues(alpha: isDark ? 0.08 : 0.05),
+        border: Border.all(
+          color: selected
+              ? cs.primary.withValues(alpha: 0.28)
+              : cs.onSurface.withValues(alpha: isDark ? 0.10 : 0.07),
+        ),
+      ),
+      child: Text(
+        '$index',
+        style: TextStyle(
+          fontSize: 11,
+          fontWeight: AppFontWeights.emphasis,
+          color: selected ? cs.primary : fg.muted,
+        ),
+      ),
+    );
+  }
+}
+
+class _AskUserSkipPill extends StatelessWidget {
+  const _AskUserSkipPill({required this.selected, required this.onTap});
+
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final fg = _chatSurfaceForegroundPalette(context);
+    final l10n = AppLocalizations.of(context)!;
+    return IosCardPress(
+      borderRadius: BorderRadius.circular(7),
+      baseColor: Colors.transparent,
+      pressedScale: 0.98,
+      padding: EdgeInsets.zero,
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+        child: Text(
+          l10n.askUserCardSkip,
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: AppFontWeights.semibold,
+            color: selected ? cs.primary.withValues(alpha: 0.78) : fg.muted,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _AskUserSubmitButton extends StatelessWidget {
+  const _AskUserSubmitButton({
+    required this.label,
+    required this.color,
+    required this.onTap,
+  });
+
+  final String label;
+  final Color color;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = onTap != null;
+    final cs = Theme.of(context).colorScheme;
+    return IosCardPress(
+      borderRadius: BorderRadius.circular(14),
+      baseColor: enabled
+          ? color.withValues(alpha: 0.86)
+          : cs.surfaceContainerHighest.withValues(alpha: 0.45),
+      pressedScale: enabled ? 0.985 : 1,
+      padding: EdgeInsets.zero,
+      onTap: onTap,
+      child: Container(
+        height: 38,
+        padding: const EdgeInsets.symmetric(horizontal: 14),
+        decoration: BoxDecoration(borderRadius: BorderRadius.circular(14)),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Lucide.ArrowUp,
+              size: 15,
+              color: enabled
+                  ? cs.onPrimary
+                  : cs.onSurface.withValues(alpha: 0.38),
+            ),
+            const SizedBox(width: 7),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: AppFontWeights.heavy,
+                color: enabled
+                    ? cs.onPrimary
+                    : cs.onSurface.withValues(alpha: 0.38),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 /// Tactile button for tool approval actions (approve / deny).
 class _ApprovalButton extends StatelessWidget {
   const _ApprovalButton({
@@ -4824,7 +5650,7 @@ class _ApprovalButton extends StatelessWidget {
 
   final String label;
   final Color color;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
 
   /// When true, uses a solid fill background; when false, outline style.
   final bool filled;
@@ -4832,6 +5658,7 @@ class _ApprovalButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
+    final enabled = onTap != null;
     return GestureDetector(
       onTap: onTap,
       behavior: HitTestBehavior.opaque,
@@ -4851,8 +5678,8 @@ class _ApprovalButton extends StatelessWidget {
           label,
           style: TextStyle(
             fontSize: 13,
-            fontWeight: FontWeight.w600,
-            color: color,
+            fontWeight: AppFontWeights.semibold,
+            color: enabled ? color : color.withValues(alpha: 0.45),
           ),
         ),
       ),
@@ -4860,190 +5687,54 @@ class _ApprovalButton extends StatelessWidget {
   }
 }
 
-/// Card-style search result item for tool detail view.
-/// Shows favicon, title, text snippet, and URL in a tappable card.
-class _SearchResultCard extends StatelessWidget {
-  const _SearchResultCard({
-    required this.title,
-    required this.url,
-    this.text = '',
-    this.index,
+class _SourcesSummaryCard extends StatelessWidget {
+  const _SourcesSummaryCard({
+    required this.count,
+    required this.items,
+    required this.onTap,
   });
-  final String title;
-  final String url;
-  final String text;
-  final String? index;
 
-  static final _pureNumber = RegExp(r'^\d+$');
-
-  String _domain(String url) {
-    try {
-      return _tryNormalizeExternalUri(url)?.host ?? '';
-    } catch (_) {
-      return '';
-    }
-  }
-
-  /// A title is "real" if it is non-empty and not a pure number like "1","2".
-  bool _hasRealTitle() =>
-      title.isNotEmpty && !_pureNumber.hasMatch(title.trim());
+  final int count;
+  final List<Map<String, dynamic>> items;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     final cs = Theme.of(context).colorScheme;
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    final domain = _domain(url);
-    final faviconUrl = domain.isNotEmpty
-        ? 'https://www.google.com/s2/favicons?domain=$domain&sz=32'
-        : '';
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: IosCardPress(
-        borderRadius: BorderRadius.circular(12),
-        baseColor: isDark
-            ? cs.surfaceContainerHighest.withValues(alpha: 0.5)
-            : cs.surfaceContainerHighest.withValues(alpha: 0.45),
-        pressedScale: 1.0,
-        duration: const Duration(milliseconds: 200),
-        onTap: () async {
-          final l10n = AppLocalizations.of(context)!;
-          final uri = _tryNormalizeExternalUri(url);
-          if (uri == null) {
-            showAppSnackBar(
-              context,
-              message: l10n.chatMessageWidgetOpenLinkError,
-              type: NotificationType.error,
-            );
-            return;
-          }
-          try {
-            final ok = await launchUrl(
-              uri,
-              mode: LaunchMode.externalApplication,
-            );
-            if (!ok && context.mounted) {
-              showAppSnackBar(
-                context,
-                message: l10n.chatMessageWidgetCannotOpenUrl(uri.toString()),
-                type: NotificationType.error,
-              );
-            }
-          } catch (_) {
-            if (!context.mounted) return;
-            showAppSnackBar(
-              context,
-              message: l10n.chatMessageWidgetOpenLinkError,
-              type: NotificationType.error,
-            );
-          }
-        },
-        padding: const EdgeInsets.all(12),
+    final l10n = AppLocalizations.of(context)!;
+    final label = l10n.chatMessageWidgetCitationsCount(count);
+    final isDark = theme.brightness == Brightness.dark;
+
+    return IosCardPress(
+      borderRadius: BorderRadius.circular(20),
+      border: Border.all(
+        color: isDark
+            ? Colors.white.withValues(alpha: 0.16)
+            : Colors.black.withValues(alpha: 0.10),
+        width: 0.8,
+      ),
+      baseColor: Colors.transparent,
+      pressedScale: 1.0,
+      duration: const Duration(milliseconds: 260),
+      onTap: onTap,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 18),
         child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
           children: [
-            // Favicon with optional index badge
-            SizedBox(
-              width: 36,
-              height: 36,
-              child: Stack(
-                clipBehavior: Clip.none,
-                children: [
-                  Positioned(
-                    right: 0,
-                    bottom: 0,
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(8),
-                      child: Container(
-                        width: 32,
-                        height: 32,
-                        color: cs.surfaceContainerHigh,
-                        child: faviconUrl.isNotEmpty
-                            ? Image.network(
-                                faviconUrl,
-                                width: 32,
-                                height: 32,
-                                fit: BoxFit.contain,
-                                errorBuilder: (_, __, ___) => Icon(
-                                  Lucide.Globe,
-                                  size: 18,
-                                  color: cs.onSurface.withValues(alpha: 0.5),
-                                ),
-                              )
-                            : Icon(
-                                Lucide.Globe,
-                                size: 18,
-                                color: cs.onSurface.withValues(alpha: 0.5),
-                              ),
-                      ),
-                    ),
-                  ),
-                  if (index != null)
-                    Positioned(
-                      left: 0,
-                      top: 0,
-                      child: Container(
-                        width: 16,
-                        height: 16,
-                        alignment: Alignment.center,
-                        decoration: BoxDecoration(
-                          color: cs.primary,
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Text(
-                          index!,
-                          style: TextStyle(
-                            fontSize: 9,
-                            fontWeight: FontWeight.w700,
-                            color: cs.onPrimary,
-                          ),
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-            const SizedBox(width: 10),
-            // Content
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // Title
-                  Text(
-                    _hasRealTitle() ? title : domain,
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600,
-                      color: cs.onSurface,
-                    ),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  // Text snippet
-                  if (text.isNotEmpty) ...[
-                    const SizedBox(height: 3),
-                    Text(
-                      text,
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: cs.onSurface.withValues(alpha: 0.6),
-                      ),
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ],
-                  // URL
-                  const SizedBox(height: 3),
-                  Text(
-                    url,
-                    style: TextStyle(
-                      fontSize: 11,
-                      color: cs.onSurface.withValues(alpha: 0.4),
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ],
+            _SourceFaviconStack(items: items),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.clip,
+              style: TextStyle(
+                fontSize: 12,
+                height: 1,
+                fontWeight: AppFontWeights.semibold,
+                color: cs.onSurface.withValues(alpha: isDark ? 0.90 : 0.86),
               ),
             ),
           ],
@@ -5053,39 +5744,108 @@ class _SearchResultCard extends StatelessWidget {
   }
 }
 
-class _SourcesSummaryCard extends StatelessWidget {
-  const _SourcesSummaryCard({required this.count, required this.onTap});
-  final int count;
-  final VoidCallback onTap;
+class _SourceFaviconStack extends StatelessWidget {
+  const _SourceFaviconStack({required this.items});
+
+  final List<Map<String, dynamic>> items;
+
+  static const double _iconSize = 16;
+  static const double _slotSize = 18;
+  static const double _overlapStep = 11;
+  static const int _maxIcons = 3;
+
+  @override
+  Widget build(BuildContext context) {
+    final domains = _domains();
+    if (domains.isEmpty) {
+      return const _SourceFaviconFallback(size: _slotSize);
+    }
+
+    return SizedBox(
+      width: _slotSize + (domains.length - 1) * _overlapStep,
+      height: _slotSize,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          for (var i = 0; i < domains.length; i++)
+            PositionedDirectional(
+              start: i * _overlapStep,
+              top: 1,
+              child: _SourceFavicon(domain: domains[i]),
+            ),
+        ],
+      ),
+    );
+  }
+
+  List<String> _domains() {
+    final seen = <String>{};
+    final domains = <String>[];
+    for (final item in items) {
+      final url = (item['url'] ?? '').toString();
+      final host = _tryNormalizeExternalUri(url)?.host ?? '';
+      if (host.isEmpty || !seen.add(host)) {
+        continue;
+      }
+      domains.add(host);
+      if (domains.length == _maxIcons) {
+        break;
+      }
+    }
+    return domains;
+  }
+}
+
+class _SourceFavicon extends StatelessWidget {
+  const _SourceFavicon({required this.domain});
+
+  final String domain;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final isDark = theme.brightness == Brightness.dark;
+    final borderColor = isDark
+        ? Colors.white.withValues(alpha: 0.14)
+        : Colors.black.withValues(alpha: 0.06);
+
+    return Container(
+      width: _SourceFaviconStack._iconSize,
+      height: _SourceFaviconStack._iconSize,
+      decoration: BoxDecoration(
+        color: isDark ? cs.surfaceContainerHigh : cs.surface,
+        shape: BoxShape.circle,
+        border: Border.all(color: borderColor, width: 0.5),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Image.network(
+        'https://favicone.com/$domain',
+        width: _SourceFaviconStack._iconSize,
+        height: _SourceFaviconStack._iconSize,
+        fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) =>
+            const _SourceFaviconFallback(size: _SourceFaviconStack._iconSize),
+      ),
+    );
+  }
+}
+
+class _SourceFaviconFallback extends StatelessWidget {
+  const _SourceFaviconFallback({required this.size});
+
+  final double size;
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final l10n = AppLocalizations.of(context)!;
-    final label = l10n.chatMessageWidgetCitationsCount(count);
-    return IosCardPress(
-      borderRadius: BorderRadius.circular(12),
-      baseColor: cs.primaryContainer.withValues(
-        alpha: Theme.of(context).brightness == Brightness.dark ? 0.25 : 0.30,
-      ),
-      pressedScale: 1.0,
-      duration: const Duration(milliseconds: 260),
-      onTap: onTap,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(Lucide.BookOpen, size: 16, color: cs.secondary),
-          const SizedBox(width: 8),
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
-              color: cs.secondary,
-            ),
-          ),
-        ],
+    return SizedBox(
+      width: size,
+      height: size,
+      child: Icon(
+        Lucide.Globe,
+        size: size * 0.72,
+        color: cs.onSurface.withValues(alpha: 0.52),
       ),
     );
   }
@@ -5211,7 +5971,7 @@ class _ReasoningSectionState extends State<_ReasoningSection>
                 l10n.chatMessageWidgetDeepThinking,
                 style: TextStyle(
                   fontSize: 13,
-                  fontWeight: FontWeight.w700,
+                  fontWeight: AppFontWeights.emphasis,
                   color: fg.strong,
                 ),
               ),
@@ -5269,6 +6029,7 @@ class _ReasoningSectionState extends State<_ReasoningSection>
           child: MarkdownWithCodeHighlight(
             text: text.isNotEmpty ? text : '…',
             baseStyle: baseStyle,
+            streaming: isLoading,
           ),
         );
       }

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:ui' as ui;
+import 'package:Kelivo/theme/app_font_weights.dart';
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -238,9 +239,21 @@ class _ReasoningContent extends StatelessWidget {
   final String? modelProvider;
   final String? modelId;
 
-  bool _isCustomSelected(int? budget, {required bool showXhigh}) {
+  bool _isCustomSelected(
+    int? budget, {
+    required bool showXhigh,
+    required bool showMax,
+  }) {
     final v = budget ?? -1;
-    final presets = <int>{-1, 0, 1024, 16000, 32000, if (showXhigh) 64000};
+    final presets = <int>{
+      -1,
+      0,
+      1024,
+      16000,
+      32000,
+      if (showXhigh) 64000,
+      if (showMax) 128000,
+    };
     return !presets.contains(v);
   }
 
@@ -253,10 +266,19 @@ class _ReasoningContent extends StatelessWidget {
     final currentModelId =
         modelId ?? assistant?.chatModelId ?? settings.currentModelId;
     if (currentProvider == null || currentModelId == null) return false;
-    return settings.supportsOpenAIXhighReasoning(
-      currentProvider,
-      currentModelId,
-    );
+    return settings.supportsXhighReasoning(currentProvider, currentModelId);
+  }
+
+  bool _showMaxOption(BuildContext context, SettingsProvider settings) {
+    final assistant = context.read<AssistantProvider>().currentAssistant;
+    final currentProvider =
+        modelProvider ??
+        assistant?.chatModelProvider ??
+        settings.currentModelProvider;
+    final currentModelId =
+        modelId ?? assistant?.chatModelId ?? settings.currentModelId;
+    if (currentProvider == null || currentModelId == null) return false;
+    return settings.supportsMaxReasoning(currentProvider, currentModelId);
   }
 
   @override
@@ -264,10 +286,12 @@ class _ReasoningContent extends StatelessWidget {
     final l10n = AppLocalizations.of(context)!;
     final sp = context.watch<SettingsProvider>();
     final showXhigh = _showXhighOption(context, sp);
+    final showMax = _showMaxOption(context, sp);
     final selected = sp.thinkingBudget ?? -1;
     final customActive = _isCustomSelected(
       sp.thinkingBudget,
       showXhigh: showXhigh,
+      showMax: showMax,
     );
 
     Widget tile({
@@ -295,9 +319,9 @@ class _ReasoningContent extends StatelessWidget {
                 await context.read<SettingsProvider>().setThinkingBudget(value);
                 await onDone();
               },
-          labelStyle: const TextStyle(
+          labelStyle: TextStyle(
             fontSize: 13,
-            fontWeight: FontWeight.w400,
+            fontWeight: AppFontWeights.regular,
             decoration: TextDecoration.none,
           ).copyWith(color: onColor),
         ),
@@ -366,6 +390,16 @@ class _ReasoningContent extends StatelessWidget {
                 label: l10n.reasoningBudgetSheetXhigh,
                 value: 64000,
               ),
+            if (showMax)
+              tile(
+                leadingBuilder: (c) => ReasoningIcons.budgetIcon(
+                  ReasoningIcons.maxBudget,
+                  size: 16,
+                  color: c,
+                ),
+                label: l10n.reasoningBudgetSheetMax,
+                value: 128000,
+              ),
             tile(
               leadingBuilder: (c) => Icon(Lucide.Hash, size: 16, color: c),
               label: l10n.reasoningBudgetSheetCustomLabel,
@@ -376,7 +410,7 @@ class _ReasoningContent extends StatelessWidget {
                       selected.toString(),
                       style: TextStyle(
                         fontSize: 12,
-                        fontWeight: FontWeight.w600,
+                        fontWeight: AppFontWeights.semibold,
                         color: Theme.of(context).colorScheme.primary,
                         decoration: TextDecoration.none,
                       ),
@@ -389,7 +423,7 @@ class _ReasoningContent extends StatelessWidget {
                       ).colorScheme.onSurface.withValues(alpha: 0.45),
                     ),
               onTap: () async {
-                final initialValue = selected >= 1024 ? selected : 2048;
+                final initialValue = customActive ? selected : 2048;
                 onSuspendedChanged(true);
                 var restore = true;
                 try {
@@ -480,9 +514,9 @@ class _HoverRowState extends State<_HoverRow> {
                   overflow: TextOverflow.ellipsis,
                   style:
                       widget.labelStyle ??
-                      const TextStyle(
+                      TextStyle(
                         fontSize: 13,
-                        fontWeight: FontWeight.w400,
+                        fontWeight: AppFontWeights.regular,
                         decoration: TextDecoration.none,
                       ),
                 ),

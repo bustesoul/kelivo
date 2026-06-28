@@ -10,13 +10,134 @@ import '../../../core/providers/settings_provider.dart';
 import '../../../core/services/api/chat_api_service.dart';
 import '../../../core/services/chat/chat_service.dart';
 import '../../../core/services/logging/flutter_logger.dart';
+import '../../../l10n/app_localizations.dart';
 import '../../chat/widgets/chat_message_widget.dart' show ToolUIPart;
 import '../services/message_builder_service.dart';
 import '../services/message_generation_service.dart';
+import '../services/chat_suggestion_service.dart';
 import 'chat_actions.dart';
 import 'chat_controller.dart';
 import 'generation_controller.dart';
 import 'stream_controller.dart' as stream_ctrl;
+
+enum CompressContextLimitMode { start, recent, unlimited }
+
+class CompressContextOptions {
+  const CompressContextOptions({required this.mode, this.maxChars});
+
+  static const int defaultMaxChars = 6000;
+
+  final CompressContextLimitMode mode;
+  final int? maxChars;
+}
+
+String buildCompressContextContent(
+  String joined,
+  CompressContextOptions options,
+) {
+  if (options.mode == CompressContextLimitMode.unlimited) return joined;
+  final maxChars = options.maxChars ?? CompressContextOptions.defaultMaxChars;
+  if (maxChars <= 0 || joined.length <= maxChars) return joined;
+  return switch (options.mode) {
+    CompressContextLimitMode.start => joined.substring(0, maxChars),
+    CompressContextLimitMode.recent => joined.substring(
+      joined.length - maxChars,
+    ),
+    CompressContextLimitMode.unlimited => joined,
+  };
+}
+
+String buildConversationTextForCompression(List<ChatMessage> messages) {
+  return messages
+      .where((m) => m.content.trim().isNotEmpty)
+      .map(
+        (m) => '${m.role == "assistant" ? "Assistant" : "User"}: ${m.content}',
+      )
+      .join('\n\n');
+}
+
+List<ChatMessage> selectForkConversationMessages({
+  required List<ChatMessage> messages,
+  required ChatMessage targetMessage,
+  Map<String, int> versionSelections = const <String, int>{},
+}) {
+  final Map<String, List<ChatMessage>> byGroup = <String, List<ChatMessage>>{};
+  final List<String> groupOrder = <String>[];
+  for (final message in messages) {
+    final groupId = message.groupId ?? message.id;
+    byGroup
+        .putIfAbsent(groupId, () {
+          groupOrder.add(groupId);
+          return <ChatMessage>[];
+        })
+        .add(message);
+  }
+
+  final targetGroup = (targetMessage.groupId ?? targetMessage.id);
+  final targetOrderIndex = groupOrder.indexOf(targetGroup);
+  if (targetOrderIndex < 0) return const <ChatMessage>[];
+
+  final selected = <ChatMessage>[];
+  for (final groupId in groupOrder.take(targetOrderIndex + 1)) {
+    final versions = byGroup[groupId]!
+      ..sort((a, b) => a.version.compareTo(b.version));
+    final targetVersionIndex = versions.indexWhere(
+      (message) => message.id == targetMessage.id,
+    );
+    if (targetVersionIndex >= 0) {
+      selected.add(versions[targetVersionIndex]);
+      continue;
+    }
+
+    final selectedVersion = versionSelections[groupId];
+    final selectedIndex =
+        selectedVersion != null &&
+            selectedVersion >= 0 &&
+            selectedVersion < versions.length
+        ? selectedVersion
+        : versions.length - 1;
+    selected.add(versions[selectedIndex]);
+  }
+  return selected;
+}
+
+class BatchDeleteGroupPlan {
+  const BatchDeleteGroupPlan({
+    required this.groupId,
+    required this.versionsBefore,
+    required this.deletedMessageIds,
+    required this.nextVersionSelection,
+  });
+
+  final String groupId;
+  final List<ChatMessage> versionsBefore;
+  final Set<String> deletedMessageIds;
+  final int? nextVersionSelection;
+}
+
+class BatchDeletePlan {
+  const BatchDeletePlan({
+    required this.groups,
+    required this.nextVersionSelections,
+    required this.clearedVersionSelectionGroupIds,
+  });
+
+  static const empty = BatchDeletePlan(
+    groups: <String, BatchDeleteGroupPlan>{},
+    nextVersionSelections: <String, int>{},
+    clearedVersionSelectionGroupIds: <String>{},
+  );
+
+  final Map<String, BatchDeleteGroupPlan> groups;
+  final Map<String, int> nextVersionSelections;
+  final Set<String> clearedVersionSelectionGroupIds;
+
+  bool get isEmpty => groups.isEmpty;
+
+  Set<String> get deletedMessageIds => {
+    for (final group in groups.values) ...group.deletedMessageIds,
+  };
+}
 
 /// ViewModel for the home page, combining actions + services.
 ///
@@ -32,29 +153,23 @@ import 'stream_controller.dart' as stream_ctrl;
 /// - Handle UI-specific concerns (snackbars, scrolling, animations)
 class HomeViewModel extends ChangeNotifier {
   HomeViewModel({
-    required ChatService chatService,
-    required MessageBuilderService messageBuilderService,
-    required MessageGenerationService messageGenerationService,
-    required GenerationController generationController,
-    required stream_ctrl.StreamController streamController,
-    required ChatController chatController,
-    required BuildContext contextProvider,
+    required this._chatService,
+    required this._messageBuilderService,
+    required this._messageGenerationService,
+    required this._generationController,
+    required this._streamController,
+    required this._chatController,
+    required this._contextProvider,
     required this.getTitleForLocale,
-  }) : _chatService = chatService,
-       _messageBuilderService = messageBuilderService,
-       _messageGenerationService = messageGenerationService,
-       _generationController = generationController,
-       _streamController = streamController,
-       _chatController = chatController,
-       _contextProvider = contextProvider {
+  }) {
     // Initialize ChatActions
     _chatActions = ChatActions(
-      chatService: chatService,
-      chatController: chatController,
-      streamController: streamController,
-      generationController: generationController,
-      messageGenerationService: messageGenerationService,
-      contextProvider: contextProvider,
+      chatService: _chatService,
+      chatController: _chatController,
+      streamController: _streamController,
+      generationController: _generationController,
+      messageGenerationService: _messageGenerationService,
+      contextProvider: _contextProvider,
       viewModel: this,
     );
 
@@ -65,7 +180,9 @@ class HomeViewModel extends ChangeNotifier {
     _chatActions.onStreamError = _onStreamError;
     _chatActions.onMaybeGenerateTitle = _onMaybeGenerateTitle;
     _chatActions.onMaybeGenerateSummary = _onMaybeGenerateSummary;
+    _chatActions.onMaybeGenerateSuggestions = _onMaybeGenerateSuggestions;
     _chatActions.onStreamFinished = _onStreamFinished;
+    _chatActions.onAssistantMessageFinished = _onAssistantMessageFinished;
     _chatActions.onFileProcessingStarted = _onFileProcessingStarted;
     _chatActions.onFileProcessingFinished = _onFileProcessingFinished;
   }
@@ -83,6 +200,8 @@ class HomeViewModel extends ChangeNotifier {
   final stream_ctrl.StreamController _streamController;
   final ChatController _chatController;
   final BuildContext _contextProvider;
+  final ChatSuggestionService _suggestionService =
+      const ChatSuggestionService();
   late final ChatActions _chatActions;
   QueuedChatInput? _queuedInput;
   bool _isDrainingQueuedInput = false;
@@ -102,6 +221,9 @@ class HomeViewModel extends ChangeNotifier {
 
   /// Called when streaming finishes (UI may show notification).
   VoidCallback? onStreamFinished;
+
+  /// Called when a successful assistant reply is finalized.
+  void Function(ChatMessage message)? onAssistantMessageFinished;
 
   /// Called to schedule inline image sanitization.
   void Function(String messageId, String content, {bool immediate})?
@@ -158,6 +280,7 @@ class HomeViewModel extends ChangeNotifier {
 
   void _onMessagesChanged() {
     _chatController.invalidateCache();
+    _chatController.refreshLoadedMessageCount();
     notifyListeners();
   }
 
@@ -197,8 +320,16 @@ class HomeViewModel extends ChangeNotifier {
     _maybeGenerateSummaryFor(conversationId);
   }
 
+  void _onMaybeGenerateSuggestions(String conversationId) {
+    _maybeGenerateSuggestionsFor(conversationId);
+  }
+
   void _onStreamFinished() {
     onStreamFinished?.call();
+  }
+
+  void _onAssistantMessageFinished(ChatMessage message) {
+    onAssistantMessageFinished?.call(message);
   }
 
   void _onFileProcessingStarted() {
@@ -273,6 +404,8 @@ class HomeViewModel extends ChangeNotifier {
 
     _chatActions.onScheduleImageSanitize = onScheduleImageSanitize;
 
+    await _clearSuggestionsFor(conversation.id);
+
     if (input.documents.isNotEmpty) {
       isProcessingFiles.value = true;
     }
@@ -303,6 +436,7 @@ class HomeViewModel extends ChangeNotifier {
       text: input.text,
       imagePaths: List<String>.of(input.imagePaths),
       documents: List<DocumentAttachment>.of(input.documents),
+      allowImagesApiRouting: input.allowImagesApiRouting,
     );
   }
 
@@ -335,6 +469,7 @@ class HomeViewModel extends ChangeNotifier {
   Future<bool> regenerateAtMessage(
     ChatMessage message, {
     bool assistantAsNewReply = false,
+    bool allowImagesApiRouting = true,
   }) async {
     final conversation = currentConversation;
     if (conversation == null) {
@@ -345,11 +480,43 @@ class HomeViewModel extends ChangeNotifier {
     _chatActions.onScheduleImageSanitize = onScheduleImageSanitize;
 
     onHapticFeedback?.call();
+    await _clearSuggestionsFor(conversation.id);
 
     final result = await _chatActions.regenerateAtMessage(
       message: message,
       conversation: conversation,
       assistantAsNewReply: assistantAsNewReply,
+      allowImagesApiRouting: allowImagesApiRouting,
+    );
+
+    if (!result.success) {
+      if (result.errorMessage == 'no_model') {
+        onWarning?.call('no_model');
+      } else {
+        onError?.call(result.errorMessage ?? 'unknown_error');
+      }
+      return false;
+    }
+
+    return true;
+  }
+
+  Future<bool> continueAssistantMessageAfterToolAnswer(
+    ChatMessage message, {
+    bool allowImagesApiRouting = true,
+  }) async {
+    final conversation = currentConversation;
+    if (conversation == null) {
+      return false;
+    }
+
+    _chatActions.onScheduleImageSanitize = onScheduleImageSanitize;
+    await _clearSuggestionsFor(conversation.id);
+
+    final result = await _chatActions.continueAssistantMessageAfterToolAnswer(
+      message: message,
+      conversation: conversation,
+      allowImagesApiRouting: allowImagesApiRouting,
     );
 
     if (!result.success) {
@@ -439,12 +606,135 @@ class HomeViewModel extends ChangeNotifier {
     return newSelection;
   }
 
+  @visibleForTesting
+  static BatchDeletePlan buildBatchDeletePlan({
+    required List<ChatMessage> messages,
+    required Set<String> selectedMessageIds,
+    required Map<String, int> versionSelections,
+    bool deleteAllVersions = false,
+  }) {
+    if (selectedMessageIds.isEmpty || messages.isEmpty) {
+      return BatchDeletePlan.empty;
+    }
+
+    final byGroup = <String, List<ChatMessage>>{};
+    final deletedByGroup = <String, Set<String>>{};
+    for (final message in messages) {
+      final groupId = message.groupId ?? message.id;
+      byGroup.putIfAbsent(groupId, () => <ChatMessage>[]).add(message);
+      if (selectedMessageIds.contains(message.id)) {
+        deletedByGroup.putIfAbsent(groupId, () => <String>{});
+        if (!deleteAllVersions) {
+          deletedByGroup[groupId]!.add(message.id);
+        }
+      }
+    }
+
+    if (deletedByGroup.isEmpty) return BatchDeletePlan.empty;
+
+    final groups = <String, BatchDeleteGroupPlan>{};
+    final nextVersionSelections = <String, int>{};
+    final clearedVersionSelectionGroupIds = <String>{};
+
+    for (final entry in deletedByGroup.entries) {
+      final groupId = entry.key;
+      final versionsBefore = List<ChatMessage>.of(
+        byGroup[groupId] ?? const <ChatMessage>[],
+      )..sort((a, b) => a.version.compareTo(b.version));
+      final deletedMessageIds = deleteAllVersions
+          ? versionsBefore.map((message) => message.id).toSet()
+          : Set<String>.of(entry.value);
+      final oldSelection =
+          versionSelections[groupId] ??
+          (versionsBefore.isNotEmpty ? versionsBefore.length - 1 : 0);
+      final nextVersionSelection = computeNextVersionSelection(
+        versionsBefore: versionsBefore,
+        deletedMessageIds: deletedMessageIds,
+        oldSelection: oldSelection,
+      );
+
+      groups[groupId] = BatchDeleteGroupPlan(
+        groupId: groupId,
+        versionsBefore: versionsBefore,
+        deletedMessageIds: deletedMessageIds,
+        nextVersionSelection: nextVersionSelection,
+      );
+
+      if (nextVersionSelection == null) {
+        clearedVersionSelectionGroupIds.add(groupId);
+      } else {
+        nextVersionSelections[groupId] = nextVersionSelection;
+      }
+    }
+
+    return BatchDeletePlan(
+      groups: groups,
+      nextVersionSelections: nextVersionSelections,
+      clearedVersionSelectionGroupIds: clearedVersionSelectionGroupIds,
+    );
+  }
+
+  Future<void> deleteMessages({
+    required Set<String> messageIds,
+    bool deleteAllVersions = false,
+  }) async {
+    final conversation = currentConversation;
+    if (conversation == null || messageIds.isEmpty) return;
+
+    await _clearSuggestionsFor(conversation.id);
+
+    final allMessages = _chatService.getMessagesRange(
+      conversation.id,
+      start: 0,
+      limit: _chatService.getMessageCount(conversation.id),
+    );
+    final plan = buildBatchDeletePlan(
+      messages: allMessages,
+      selectedMessageIds: messageIds,
+      versionSelections: _chatController.versionSelections,
+      deleteAllVersions: deleteAllVersions,
+    );
+    if (plan.isEmpty) return;
+
+    for (final id in plan.deletedMessageIds) {
+      _streamController.clearMessageState(id);
+    }
+
+    for (final groupId in plan.clearedVersionSelectionGroupIds) {
+      _chatController.versionSelections.remove(groupId);
+      await _chatService.clearSelectedVersion(conversation.id, groupId);
+    }
+    for (final entry in plan.nextVersionSelections.entries) {
+      _chatController.versionSelections[entry.key] = entry.value;
+      await _chatService.setSelectedVersion(
+        conversation.id,
+        entry.key,
+        entry.value,
+      );
+    }
+
+    final messagesToDelete = allMessages
+        .where((message) => plan.deletedMessageIds.contains(message.id))
+        .toList();
+    for (final message in messagesToDelete) {
+      await _chatService.deleteMessage(message.id);
+    }
+
+    _chatController.reloadMessages();
+    notifyListeners();
+  }
+
   Future<void> _deleteMessageVersions({
     required String gid,
     required List<ChatMessage> versionsBefore,
     required Set<String> deletedMessageIds,
   }) async {
     if (deletedMessageIds.isEmpty) return;
+
+    final cid = currentConversation?.id;
+    if (cid != null) {
+      await _clearSuggestionsFor(cid);
+    }
 
     final oldSel =
         versionSelections[gid] ??
@@ -570,38 +860,48 @@ class HomeViewModel extends ChangeNotifier {
     onScrollToBottom?.call();
   }
 
+  Future<void> toggleTemporaryConversation() async {
+    final convo = currentConversation;
+    if (convo == null || messages.isNotEmpty) return;
+
+    await _chatActions.flushConversationProgress(currentConversation);
+    if (!_contextProvider.mounted) return;
+
+    isProcessingFiles.value = false;
+
+    if (_chatService.isTemporaryConversation(convo.id)) {
+      await createNewConversation();
+      return;
+    }
+
+    final ap = _contextProvider.read<AssistantProvider>();
+    final conversation = await _chatService.createDraftConversation(
+      title: AppLocalizations.of(_contextProvider)!.temporaryChatTitle,
+      assistantId: ap.currentAssistantId,
+      temporary: true,
+    );
+
+    _chatController.setCurrentConversation(conversation);
+    _streamController.clearAllState();
+    notifyListeners();
+    onScrollToBottom?.call();
+  }
+
   /// Fork conversation at a specific message.
   Future<void> forkConversation(ChatMessage message) async {
-    // Determine included groups up to the message's group (inclusive)
-    final Map<String, int> groupFirstIndex = <String, int>{};
-    final List<String> groupOrder = <String>[];
-    for (int i = 0; i < messages.length; i++) {
-      final gid0 = (messages[i].groupId ?? messages[i].id);
-      if (!groupFirstIndex.containsKey(gid0)) {
-        groupFirstIndex[gid0] = i;
-        groupOrder.add(gid0);
-      }
-    }
-    final targetGroup = (message.groupId ?? message.id);
-    final targetOrderIndex = groupOrder.indexOf(targetGroup);
-    if (targetOrderIndex < 0) return;
+    final allMessages = _chatController
+        .allMessagesForCurrentConversationContext();
+    final selected = selectForkConversationMessages(
+      messages: allMessages,
+      targetMessage: message,
+      versionSelections: versionSelections,
+    );
+    if (selected.isEmpty) return;
 
-    final includeGroups = groupOrder.take(targetOrderIndex + 1).toSet();
-    final selected = [
-      for (final m in messages)
-        if (includeGroups.contains(m.groupId ?? m.id)) m,
-    ];
-    // Filter version selections to included groups
-    final sel = <String, int>{};
-    for (final gid in includeGroups) {
-      final v = versionSelections[gid];
-      if (v != null) sel[gid] = v;
-    }
     final newConvo = await _chatService.forkConversation(
       title: getTitleForLocale(_contextProvider),
       assistantId: currentConversation?.assistantId,
       sourceMessages: selected,
-      versionSelections: sel,
     );
 
     // Switch to the new conversation
@@ -618,9 +918,11 @@ class HomeViewModel extends ChangeNotifier {
     final convo = currentConversation;
     if (convo == null) return;
 
+    final defaultTitle = getTitleForLocale(_contextProvider);
+    await _clearSuggestionsFor(convo.id);
     final updated = await _chatService.toggleTruncateAtTail(
       convo.id,
-      defaultTitle: getTitleForLocale(_contextProvider),
+      defaultTitle: defaultTitle,
     );
     if (updated != null) {
       _chatController.updateCurrentConversation(updated);
@@ -630,27 +932,22 @@ class HomeViewModel extends ChangeNotifier {
 
   /// Compress context: summarize messages via LLM, create new conversation with summary.
   /// Returns null on success, or an error key string on failure.
-  Future<String?> compressContext() async {
+  Future<String?> compressContext({
+    required CompressContextOptions options,
+  }) async {
     final convo = currentConversation;
     if (convo == null) return 'no_conversation';
 
     // Get messages and collapse to selected versions
-    final allMsgs = _chatController.messages;
+    final allMsgs = _chatController.allMessagesForCurrentConversationContext();
     final collapsed = collapseVersions(allMsgs);
     if (collapsed.isEmpty) return 'no_messages';
 
     // Build conversation text for compression
-    final joined = collapsed
-        .where((m) => m.content.trim().isNotEmpty)
-        .map(
-          (m) =>
-              '${m.role == "assistant" ? "Assistant" : "User"}: ${m.content}',
-        )
-        .join('\n\n');
+    final joined = buildConversationTextForCompression(collapsed);
     if (joined.trim().isEmpty) return 'no_messages';
 
-    // Truncate to reasonable length
-    final content = joined.length > 6000 ? joined.substring(0, 6000) : joined;
+    final content = buildCompressContextContent(joined, options);
     final locale = Localizations.localeOf(_contextProvider).toLanguageTag();
 
     // Resolve model: compress model → summary model → title model → assistant model → global default
@@ -730,8 +1027,36 @@ class HomeViewModel extends ChangeNotifier {
     notifyListeners();
   }
 
+  bool loadMoreBefore() {
+    final loaded = _chatController.loadMoreBefore();
+    if (!loaded) return false;
+    _restoreMessageUiState();
+    notifyListeners();
+    return true;
+  }
+
+  bool loadMoreAfter() {
+    final loaded = _chatController.loadMoreAfter();
+    if (!loaded) return false;
+    _restoreMessageUiState();
+    notifyListeners();
+    return true;
+  }
+
+  bool loadUntilMessageVisible(String messageId) {
+    final loaded = _chatController.loadUntilMessageVisible(messageId);
+    if (!loaded) return false;
+    _restoreMessageUiState();
+    notifyListeners();
+    return true;
+  }
+
   /// Set selected version for a message group.
   Future<void> setSelectedVersion(String groupId, int version) async {
+    final cid = currentConversation?.id;
+    if (cid != null) {
+      await _clearSuggestionsFor(cid);
+    }
     await _chatController.setSelectedVersion(groupId, version);
     notifyListeners();
   }
@@ -806,32 +1131,47 @@ class HomeViewModel extends ChangeNotifier {
     final configured = (assistant?.limitContextMessages ?? true)
         ? (assistant?.contextMessageSize ?? 0)
         : 0;
-    // Use collapsed view for counting
-    final collapsed = collapseVersions(messages);
-    // Map raw truncate index to collapsed start index
-    final int tRaw = currentConversation?.truncateIndex ?? -1;
-    int startCollapsed = 0;
-    if (tRaw > 0) {
-      final seen = <String>{};
-      final int limit = tRaw < messages.length ? tRaw : messages.length;
-      int count = 0;
-      for (int i = 0; i < limit; i++) {
-        final gid0 = (messages[i].groupId ?? messages[i].id);
-        if (seen.add(gid0)) count++;
-      }
-      startCollapsed = count;
-    }
-    int remaining = 0;
-    for (int i = 0; i < collapsed.length; i++) {
-      if (i >= startCollapsed) {
-        if (collapsed[i].content.trim().isNotEmpty) remaining++;
-      }
-    }
+    final completeMessages = _chatController
+        .allMessagesForCurrentConversationContext();
+    final collapsed = collapseVersions(completeMessages);
+    final remaining = computeClearContextRemainingMessageCount(
+      completeMessages: completeMessages,
+      collapsedMessages: collapsed,
+      truncateIndex: currentConversation?.truncateIndex ?? -1,
+    );
     if (configured > 0) {
       final actual = remaining > configured ? configured : remaining;
       return withCountFormatter(actual.toString(), configured.toString());
     }
     return defaultLabel;
+  }
+
+  @visibleForTesting
+  static int computeClearContextRemainingMessageCount({
+    required List<ChatMessage> completeMessages,
+    required List<ChatMessage> collapsedMessages,
+    required int truncateIndex,
+  }) {
+    var safeTruncateIndex = truncateIndex;
+    if (safeTruncateIndex < 0 || safeTruncateIndex > completeMessages.length) {
+      safeTruncateIndex = 0;
+    }
+    final firstIndexByGroup = <String, int>{};
+    for (var i = 0; i < completeMessages.length; i++) {
+      final groupId = completeMessages[i].groupId ?? completeMessages[i].id;
+      firstIndexByGroup.putIfAbsent(groupId, () => i);
+    }
+
+    var remaining = 0;
+    for (final message in collapsedMessages) {
+      if (message.content.trim().isEmpty) continue;
+      final groupId = message.groupId ?? message.id;
+      final firstIndex = firstIndexByGroup[groupId];
+      if (firstIndex != null && firstIndex >= safeTruncateIndex) {
+        remaining++;
+      }
+    }
+    return remaining;
   }
 
   // ============================================================================
@@ -870,7 +1210,9 @@ class HomeViewModel extends ChangeNotifier {
         settings.currentModelId;
     if (provKey == null || mdlId == null) return;
     final cfg = settings.getProviderConfig(provKey);
-    final budget = assistant?.thinkingBudget ?? settings.thinkingBudget;
+    final budget = settings.titleGenerationThinkingBudgetFor(
+      assistant?.thinkingBudget,
+    );
 
     // Build content from messages (truncate to reasonable length)
     final msgs = _chatService.getMessages(convo.id);
@@ -1034,6 +1376,86 @@ class HomeViewModel extends ChangeNotifier {
       }
     } catch (_) {
       // Keep old summary on failure, ignore silently
+    }
+  }
+
+  // ============================================================================
+  // Chat Suggestions
+  // ============================================================================
+
+  Future<void> _clearSuggestionsFor(String conversationId) async {
+    final convo = _chatService.getConversation(conversationId);
+    if (convo == null || convo.chatSuggestions.isEmpty) return;
+    await _chatService.clearConversationSuggestions(conversationId);
+    if (currentConversation?.id == conversationId) {
+      _chatController.updateCurrentConversation(
+        _chatService.getConversation(conversationId),
+      );
+      notifyListeners();
+    }
+  }
+
+  Future<void> _maybeGenerateSuggestionsFor(String conversationId) async {
+    final convo = _chatService.getConversation(conversationId);
+    if (convo == null) return;
+
+    final settings = _contextProvider.read<SettingsProvider>();
+    final provKey = settings.suggestionModelProvider;
+    final mdlId = settings.suggestionModelId;
+    if (provKey == null || mdlId == null) return;
+
+    final msgs = collapseVersions(_chatService.getMessages(convo.id));
+    final lastAssistant = msgs.cast<ChatMessage?>().lastWhere(
+      (m) =>
+          m != null &&
+          m.role == 'assistant' &&
+          !m.isStreaming &&
+          m.content.trim().isNotEmpty,
+      orElse: () => null,
+    );
+    if (lastAssistant == null) return;
+
+    final assistantProvider = _contextProvider.read<AssistantProvider>();
+    final assistant = convo.assistantId != null
+        ? assistantProvider.getById(convo.assistantId!)
+        : assistantProvider.currentAssistant;
+    final locale = Localizations.localeOf(_contextProvider).toLanguageTag();
+    final budget = assistant?.thinkingBudget ?? settings.thinkingBudget;
+
+    try {
+      await _chatService.clearConversationSuggestions(conversationId);
+      final suggestions = await _suggestionService.generate(
+        settings: settings,
+        providerKey: provKey,
+        modelId: mdlId,
+        messages: msgs,
+        truncateIndex: convo.truncateIndex,
+        locale: locale,
+        thinkingBudget: budget,
+      );
+      if (suggestions.isEmpty) return;
+
+      final latest = _chatService.getConversation(conversationId);
+      if (latest == null ||
+          latest.messageIds.length != convo.messageIds.length) {
+        return;
+      }
+
+      await _chatService.updateConversationSuggestions(
+        conversationId,
+        suggestions,
+      );
+      if (currentConversation?.id == conversationId) {
+        _chatController.updateCurrentConversation(
+          _chatService.getConversation(conversationId),
+        );
+        notifyListeners();
+      }
+    } catch (e) {
+      FlutterLogger.log(
+        '[SuggestionGen] Generation failed: $e',
+        tag: 'HomeViewModel',
+      );
     }
   }
 

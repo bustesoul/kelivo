@@ -2,6 +2,135 @@ import '../core/models/provider_group.dart';
 
 const String providerUngroupedGroupKey = '__ungrouped__';
 
+List<String> buildProviderGroupDisplayKeys({
+  required List<ProviderGroup> groups,
+  required int ungroupedIndex,
+}) {
+  final keys = [for (final group in groups) group.id];
+  final insertIndex = ungroupedIndex.clamp(0, keys.length);
+  keys.insert(insertIndex, providerUngroupedGroupKey);
+  return List<String>.unmodifiable(keys);
+}
+
+class ProviderGroupDisplayReorderResult {
+  const ProviderGroupDisplayReorderResult({
+    required this.groups,
+    required this.ungroupedIndex,
+  });
+
+  final List<ProviderGroup> groups;
+  final int ungroupedIndex;
+}
+
+ProviderGroupDisplayReorderResult insertProviderGroup({
+  required List<ProviderGroup> groups,
+  required int ungroupedIndex,
+  required ProviderGroup group,
+  int? insertIndex,
+}) {
+  final normalizedInsertIndex = (insertIndex ?? groups.length).clamp(
+    0,
+    groups.length,
+  );
+  final nextGroups = List<ProviderGroup>.of(groups)
+    ..insert(normalizedInsertIndex, group);
+  final nextUngroupedIndex =
+      ungroupedIndex.clamp(0, groups.length) >= normalizedInsertIndex
+      ? ungroupedIndex.clamp(0, groups.length) + 1
+      : ungroupedIndex.clamp(0, groups.length);
+
+  return ProviderGroupDisplayReorderResult(
+    groups: List<ProviderGroup>.unmodifiable(nextGroups),
+    ungroupedIndex: nextUngroupedIndex.clamp(0, nextGroups.length),
+  );
+}
+
+ProviderGroupDisplayReorderResult reorderProviderGroupDisplayWithUngrouped({
+  required List<ProviderGroup> groups,
+  required int ungroupedIndex,
+  required int oldIndex,
+  required int newIndex,
+}) {
+  final displayKeys = buildProviderGroupDisplayKeys(
+    groups: groups,
+    ungroupedIndex: ungroupedIndex,
+  );
+  if (displayKeys.isEmpty) {
+    return ProviderGroupDisplayReorderResult(
+      groups: List<ProviderGroup>.unmodifiable(groups),
+      ungroupedIndex: 0,
+    );
+  }
+  if (oldIndex < 0 || oldIndex >= displayKeys.length) {
+    return ProviderGroupDisplayReorderResult(
+      groups: List<ProviderGroup>.unmodifiable(groups),
+      ungroupedIndex: ungroupedIndex.clamp(0, groups.length),
+    );
+  }
+  final normalizedNewIndex = newIndex.clamp(0, displayKeys.length);
+  if (oldIndex == normalizedNewIndex) {
+    return ProviderGroupDisplayReorderResult(
+      groups: List<ProviderGroup>.unmodifiable(groups),
+      ungroupedIndex: ungroupedIndex.clamp(0, groups.length),
+    );
+  }
+
+  final mutKeys = List<String>.of(displayKeys);
+  final item = mutKeys.removeAt(oldIndex);
+  final insertIndex = normalizedNewIndex > oldIndex
+      ? normalizedNewIndex - 1
+      : normalizedNewIndex;
+  mutKeys.insert(insertIndex.clamp(0, mutKeys.length), item);
+
+  final groupById = {for (final group in groups) group.id: group};
+  final nextGroups = <ProviderGroup>[];
+  int nextUngroupedIndex = mutKeys.length;
+  for (int i = 0; i < mutKeys.length; i++) {
+    final key = mutKeys[i];
+    if (key == providerUngroupedGroupKey) {
+      nextUngroupedIndex = i;
+      continue;
+    }
+    final group = groupById[key];
+    if (group != null) nextGroups.add(group);
+  }
+
+  return ProviderGroupDisplayReorderResult(
+    groups: List<ProviderGroup>.unmodifiable(nextGroups),
+    ungroupedIndex: nextUngroupedIndex.clamp(0, nextGroups.length),
+  );
+}
+
+int mapVisibleGroupTargetToActualInsertIndex({
+  required List<String> fullDisplayKeys,
+  required List<String> visibleHeaderKeys,
+  required String movedGroupKey,
+  required int targetVisibleIndex,
+}) {
+  final fullWithoutMoved = List<String>.of(fullDisplayKeys)
+    ..remove(movedGroupKey);
+  final remainingVisibleHeaderKeys = [
+    for (final key in visibleHeaderKeys)
+      if (key != movedGroupKey) key,
+  ];
+
+  if (remainingVisibleHeaderKeys.isEmpty) {
+    return fullWithoutMoved.length;
+  }
+  if (targetVisibleIndex <= 0) {
+    final idx = fullWithoutMoved.indexOf(remainingVisibleHeaderKeys.first);
+    return idx >= 0 ? idx : fullWithoutMoved.length;
+  }
+  if (targetVisibleIndex >= remainingVisibleHeaderKeys.length) {
+    final idx = fullWithoutMoved.indexOf(remainingVisibleHeaderKeys.last);
+    return idx >= 0 ? idx + 1 : fullWithoutMoved.length;
+  }
+  final idx = fullWithoutMoved.indexOf(
+    remainingVisibleHeaderKeys[targetVisibleIndex],
+  );
+  return idx >= 0 ? idx : fullWithoutMoved.length;
+}
+
 // ----- Reorder analysis (UI-independent) -----
 
 sealed class ProviderGroupingRowVM {
@@ -36,6 +165,16 @@ class ProviderGroupingMoveIntent {
 
   /// Position within the target group's visible provider segment (0-based).
   final int targetPos;
+}
+
+class ProviderGroupingHeaderReorderIntent {
+  const ProviderGroupingHeaderReorderIntent({
+    required this.groupKey,
+    required this.targetDisplayIndex,
+  });
+
+  final String groupKey;
+  final int targetDisplayIndex;
 }
 
 enum ProviderGroupingReorderBlockedReason { targetGroupCollapsed }
@@ -140,6 +279,37 @@ ProviderGroupingReorderAnalysis analyzeProviderGroupingReorder({
   );
 }
 
+ProviderGroupingHeaderReorderIntent? analyzeProviderGroupingHeaderReorder({
+  required List<ProviderGroupingRowVM> rows,
+  required int oldIndex,
+  required int newIndex,
+}) {
+  if (rows.isEmpty || oldIndex < 0 || oldIndex >= rows.length) return null;
+
+  final moved = rows[oldIndex];
+  if (moved is! ProviderGroupingHeaderVM) return null;
+
+  final normalizedNewIndex = newIndex.clamp(0, rows.length);
+  final sim = List<ProviderGroupingRowVM>.from(rows);
+  final removed = sim.removeAt(oldIndex);
+  final insertIndex = normalizedNewIndex > oldIndex
+      ? normalizedNewIndex - 1
+      : normalizedNewIndex;
+  sim.insert(insertIndex.clamp(0, sim.length), removed);
+
+  final headerOrder = [
+    for (final row in sim)
+      if (row is ProviderGroupingHeaderVM) row.groupKey,
+  ];
+  final targetDisplayIndex = headerOrder.indexOf(moved.groupKey);
+  if (targetDisplayIndex < 0) return null;
+
+  return ProviderGroupingHeaderReorderIntent(
+    groupKey: moved.groupKey,
+    targetDisplayIndex: targetDisplayIndex,
+  );
+}
+
 // ----- Provider order + group map updates (pure) -----
 
 class ProviderGroupingMoveResult {
@@ -152,6 +322,51 @@ class ProviderGroupingMoveResult {
 
   /// providerKey -> groupId (missing = ungrouped)
   final Map<String, String> providerGroupMap;
+}
+
+List<String> buildProviderKeysInGroupedDisplayOrder({
+  required List<String> providersOrder,
+  required List<ProviderGroup> groups,
+  required int ungroupedIndex,
+  required Map<String, String> providerGroupMap,
+  required Iterable<String> knownProviderKeys,
+}) {
+  final validGroupIds = {for (final g in groups) g.id};
+  final mergedOrder = <String>[];
+  final seen = <String>{};
+
+  for (final key in providersOrder) {
+    if (!seen.add(key)) continue;
+    mergedOrder.add(key);
+  }
+  for (final key in knownProviderKeys) {
+    if (!seen.add(key)) continue;
+    mergedOrder.add(key);
+  }
+
+  String? groupIdFor(String key) {
+    final gid = providerGroupMap[key];
+    return (gid != null && validGroupIds.contains(gid)) ? gid : null;
+  }
+
+  final result = <String>[];
+  final displayKeys = buildProviderGroupDisplayKeys(
+    groups: groups,
+    ungroupedIndex: ungroupedIndex,
+  );
+  for (final displayKey in displayKeys) {
+    if (displayKey == providerUngroupedGroupKey) {
+      for (final key in mergedOrder) {
+        if (groupIdFor(key) == null) result.add(key);
+      }
+      continue;
+    }
+    for (final key in mergedOrder) {
+      if (groupIdFor(key) == displayKey) result.add(key);
+    }
+  }
+
+  return List<String>.unmodifiable(result);
 }
 
 ProviderGroupingMoveResult moveProviderInGroupedOrder({
@@ -233,30 +448,40 @@ ProviderGroupingMoveResult moveProviderInGroupedOrder({
 class ProviderGroupingDeleteGroupResult {
   const ProviderGroupingDeleteGroupResult({
     required this.groups,
+    required this.ungroupedIndex,
     required this.providerGroupMap,
     required this.collapsed,
   });
 
   final List<ProviderGroup> groups;
+  final int ungroupedIndex;
   final Map<String, String> providerGroupMap;
   final Map<String, bool> collapsed;
 }
 
 ProviderGroupingDeleteGroupResult deleteProviderGroup({
   required List<ProviderGroup> groups,
+  required int ungroupedIndex,
   required Map<String, String> providerGroupMap,
   required Map<String, bool> collapsed,
   required String groupId,
 }) {
+  final removedGroupIndex = groups.indexWhere((g) => g.id == groupId);
   final nextGroups = [
     for (final g in groups)
       if (g.id != groupId) g,
   ];
+  final normalizedUngroupedIndex = ungroupedIndex.clamp(0, groups.length);
+  final nextUngroupedIndex =
+      removedGroupIndex >= 0 && removedGroupIndex < normalizedUngroupedIndex
+      ? normalizedUngroupedIndex - 1
+      : normalizedUngroupedIndex;
   final nextMap = Map<String, String>.from(providerGroupMap)
     ..removeWhere((_, gid) => gid == groupId);
   final nextCollapsed = Map<String, bool>.from(collapsed)..remove(groupId);
   return ProviderGroupingDeleteGroupResult(
     groups: List<ProviderGroup>.unmodifiable(nextGroups),
+    ungroupedIndex: nextUngroupedIndex.clamp(0, nextGroups.length),
     providerGroupMap: Map<String, String>.unmodifiable(nextMap),
     collapsed: Map<String, bool>.unmodifiable(nextCollapsed),
   );

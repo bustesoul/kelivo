@@ -110,7 +110,7 @@ class MessageBuilderService {
     required List<ChatMessage> messages,
     required Map<String, int> versionSelections,
     required Conversation? currentConversation,
-    bool includeOpenAIToolMessages = false,
+    bool includeToolMessages = false,
   }) {
     final tIndex = currentConversation?.truncateIndex ?? -1;
     final List<ChatMessage> sourceAll =
@@ -125,55 +125,69 @@ class MessageBuilderService {
     final out = <Map<String, dynamic>>[];
 
     for (final m in source) {
-      if (includeOpenAIToolMessages && m.role == 'assistant') {
+      String? toolContinuationReasoningContent;
+      if (includeToolMessages && m.role == 'assistant') {
         final events = chatService.getToolEvents(m.id);
         if (events.isNotEmpty) {
-          final calls = <Map<String, dynamic>>[];
-          final toolMessages = <Map<String, dynamic>>[];
+          // Tool-call history is only valid once every call has a result.
+          final hasPendingToolEvent = events.any((e) => e['content'] == null);
+          if (!hasPendingToolEvent) {
+            toolContinuationReasoningContent =
+                _reasoningContentForToolContinuation(m);
+            final calls = <Map<String, dynamic>>[];
+            final toolMessages = <Map<String, dynamic>>[];
 
-          for (int i = 0; i < events.length; i++) {
-            final e = events[i];
-            final name = (e['name'] ?? '').toString().trim();
-            if (name.isEmpty) continue;
-            final rawId = (e['id'] ?? '').toString().trim();
-            final id = rawId.isNotEmpty
-                ? rawId
-                : 'call_${m.id.substring(0, m.id.length < 8 ? m.id.length : 8)}_$i';
+            for (int i = 0; i < events.length; i++) {
+              final e = events[i];
+              final name = (e['name'] ?? '').toString().trim();
+              if (name.isEmpty) continue;
+              final rawId = (e['id'] ?? '').toString().trim();
+              final id = rawId.isNotEmpty
+                  ? rawId
+                  : 'call_${m.id.substring(0, m.id.length < 8 ? m.id.length : 8)}_$i';
 
-            Map<String, dynamic> args = const <String, dynamic>{};
-            final a = e['arguments'];
-            if (a is Map) {
-              args = a.map((k, v) => MapEntry(k.toString(), v));
-            }
-            String argumentsJson = '{}';
-            try {
-              argumentsJson = jsonEncode(args);
-            } catch (_) {}
+              Map<String, dynamic> args = const <String, dynamic>{};
+              final a = e['arguments'];
+              if (a is Map) {
+                args = a.map((k, v) => MapEntry(k.toString(), v));
+              }
+              String argumentsJson = '{}';
+              try {
+                argumentsJson = jsonEncode(args);
+              } catch (_) {}
 
-            calls.add({
-              'id': id,
-              'type': 'function',
-              'function': {'name': name, 'arguments': argumentsJson},
-            });
+              calls.add({
+                'id': id,
+                'type': 'function',
+                'function': {'name': name, 'arguments': argumentsJson},
+                if (e['metadata'] is Map)
+                  'metadata': (e['metadata'] as Map).cast<String, dynamic>(),
+              });
 
-            final c = e['content'];
-            if (c != null) {
+              final c = e['content'];
               toolMessages.add({
                 'role': 'tool',
                 'name': name,
                 'tool_call_id': id,
                 'content': c.toString(),
+                if (e['metadata'] is Map)
+                  'metadata': (e['metadata'] as Map).cast<String, dynamic>(),
               });
             }
-          }
 
-          if (calls.isNotEmpty) {
-            out.add({
-              'role': 'assistant',
-              'content': '\n\n',
-              'tool_calls': calls,
-            });
-            out.addAll(toolMessages);
+            if (calls.isNotEmpty) {
+              final assistantToolMessage = <String, dynamic>{
+                'role': 'assistant',
+                'content': '\n\n',
+                'tool_calls': calls,
+              };
+              if (toolContinuationReasoningContent.isNotEmpty) {
+                assistantToolMessage['reasoning_content'] =
+                    toolContinuationReasoningContent;
+              }
+              out.add(assistantToolMessage);
+              out.addAll(toolMessages);
+            }
           }
         }
       }
@@ -183,17 +197,67 @@ class MessageBuilderService {
         content = geminiThoughtSignatureHandler!(m, content);
       }
       if (content.isEmpty) continue;
-      out.add(<String, dynamic>{
+      final message = <String, dynamic>{
         'role': m.role == 'assistant' ? 'assistant' : 'user',
         'content': content,
-      });
+      };
+      if (toolContinuationReasoningContent?.isNotEmpty == true) {
+        message['reasoning_content'] = toolContinuationReasoningContent;
+      }
+      out.add(message);
     }
 
     return out;
   }
 
+  ChatMessage? _latestPersistedMessage(ChatMessage message) {
+    final persisted = chatService.getMessages(message.conversationId);
+    for (final candidate in persisted) {
+      if (candidate.id == message.id) return candidate;
+    }
+    return null;
+  }
+
+  String _reasoningContentForToolContinuation(ChatMessage message) {
+    String pick(ChatMessage candidate) {
+      final direct = (candidate.reasoningText ?? '').trim();
+      if (direct.isNotEmpty) return direct;
+
+      final raw = (candidate.reasoningSegmentsJson ?? '').trim();
+      if (raw.isEmpty) return '';
+      try {
+        final decoded = jsonDecode(raw);
+        final segmentsRaw = switch (decoded) {
+          Map<String, dynamic> map => map['segments'],
+          List<dynamic> list => list,
+          _ => null,
+        };
+        if (segmentsRaw is! List) return '';
+        final parts = <String>[];
+        for (final item in segmentsRaw) {
+          if (item is! Map) continue;
+          final text = (item['text'] ?? '').toString().trim();
+          if (text.isNotEmpty) parts.add(text);
+        }
+        return parts.join('\n').trim();
+      } catch (_) {
+        return '';
+      }
+    }
+
+    final fromMessage = pick(message);
+    if (fromMessage.isNotEmpty) return fromMessage;
+
+    final persisted = _latestPersistedMessage(message);
+    if (persisted == null) return '';
+    return pick(persisted);
+  }
+
   /// Parse input data from raw message content (extracts images and documents).
-  ChatInputData parseInputFromRaw(String raw) {
+  ChatInputData parseInputFromRaw(
+    String raw, {
+    bool includeMediaFilePathsAsImages = true,
+  }) {
     final imgRe = RegExp(r"\[image:(.+?)\]");
     final fileRe = RegExp(r"\[file:(.+?)\|(.+?)\|(.+?)\]");
     final images = <String>[];
@@ -217,7 +281,8 @@ class MessageBuilderService {
         docs.add(doc);
         // Treat media attachments as image-style attachments for downstream API builders.
         final effectiveMime = _effectiveAttachmentMime(doc);
-        if ((isVideoMime(effectiveMime) || isAudioMime(effectiveMime)) &&
+        if (includeMediaFilePathsAsImages &&
+            (isVideoMime(effectiveMime) || isAudioMime(effectiveMime)) &&
             path.isNotEmpty) {
           images.add(path);
         }
@@ -473,6 +538,7 @@ class MessageBuilderService {
         final mp = contextProvider.read<MemoryProvider>();
         await mp.initialize();
         final mems = mp.getForAssistant(assistant!.id);
+        final currentHour = _formatCurrentHour(DateTime.now());
         final buf = StringBuffer();
         buf.writeln('## Memories');
         buf.writeln(
@@ -504,7 +570,7 @@ class MessageBuilderService {
 - 首次聊天时间
 - ...
 请主动调用工具记录，而不是需要用户要求。
-记忆如果包含日期信息，请包含在内，请使用绝对时间格式，并且当前时间是 ${DateTime.now().toIso8601String()}。
+记忆如果包含日期信息，请包含在内，请使用绝对时间格式，并且当前时间是$currentHour。
 无需告知用户你已更改记忆记录，也不要在对话中直接显示记忆内容，除非用户主动要求。
 相似或相关的记忆应合并为一条记录，而不要重复记录，过时记录应删除。
 你可以在和用户闲聊的时候暗示用户你能记住东西。
@@ -546,13 +612,18 @@ class MessageBuilderService {
     } catch (_) {}
   }
 
+  String _formatCurrentHour(DateTime now) {
+    return '${now.year}年${now.month}月${now.day}日的${now.hour}点';
+  }
+
   /// Inject search tool usage prompt into apiMessages.
   void injectSearchPrompt(
     List<Map<String, dynamic>> apiMessages,
     SettingsProvider settings,
+    Assistant? assistant,
     bool hasBuiltInSearch,
   ) {
-    if (settings.searchEnabled && !hasBuiltInSearch) {
+    if (assistant?.searchEnabled == true && !hasBuiltInSearch) {
       final prompt = SearchToolService.getSystemPrompt();
       _appendToSystemMessage(apiMessages, prompt);
     }

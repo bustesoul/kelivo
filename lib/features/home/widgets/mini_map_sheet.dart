@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import '../../../core/models/chat_message.dart';
 import '../../../icons/lucide_adapter.dart';
 import '../../../l10n/app_localizations.dart';
+import '../../../theme/app_font_weights.dart';
 
 Future<String?> showMiniMapSheet(
   BuildContext context,
@@ -57,6 +58,7 @@ class _MiniMapSheetState extends State<_MiniMapSheet>
     with TickerProviderStateMixin {
   late final TextEditingController _searchController;
   late final FocusNode _searchFocusNode;
+  late List<_QaPair> _pairs;
   String _query = '';
   bool _isSearching = false;
 
@@ -65,6 +67,15 @@ class _MiniMapSheetState extends State<_MiniMapSheet>
     super.initState();
     _searchController = TextEditingController();
     _searchFocusNode = FocusNode();
+    _pairs = _buildPairs(widget.messages);
+  }
+
+  @override
+  void didUpdateWidget(covariant _MiniMapSheet oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.messages, widget.messages)) {
+      _pairs = _buildPairs(widget.messages);
+    }
   }
 
   @override
@@ -111,6 +122,22 @@ class _MiniMapSheetState extends State<_MiniMapSheet>
         minChildSize: 0.35,
         maxChildSize: 0.9,
         builder: (ctx, controller) {
+          final pairs = _filteredPairs(_pairs);
+          Widget buildList() {
+            return ListView.builder(
+              controller: controller,
+              itemCount: pairs.length,
+              itemBuilder: (context, index) {
+                return _MiniMapRow(
+                  pair: pairs[index],
+                  selecting: widget.selecting,
+                  selectedMessageIds: widget.selectedMessageIds,
+                  onToggleSelection: widget.onToggleSelection,
+                );
+              },
+            );
+          }
+
           return Padding(
             padding: const EdgeInsets.fromLTRB(16, 10, 16, 16),
             child: Column(
@@ -136,9 +163,9 @@ class _MiniMapSheetState extends State<_MiniMapSheet>
                     Expanded(
                       child: Text(
                         AppLocalizations.of(context)!.miniMapTitle,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 16,
-                          fontWeight: FontWeight.w700,
+                          fontWeight: AppFontWeights.emphasis,
                         ),
                         overflow: TextOverflow.ellipsis,
                       ),
@@ -176,40 +203,9 @@ class _MiniMapSheetState extends State<_MiniMapSheet>
                   child: widget.selecting && widget.selectionListenable != null
                       ? AnimatedBuilder(
                           animation: widget.selectionListenable!,
-                          builder: (context, child) {
-                            final pairs = _filteredPairs(
-                              _buildPairs(widget.messages),
-                            );
-                            return ListView(
-                              controller: controller,
-                              children: [
-                                for (final p in pairs)
-                                  _MiniMapRow(
-                                    pair: p,
-                                    selecting: true,
-                                    selectedMessageIds:
-                                        widget.selectedMessageIds!,
-                                    onToggleSelection:
-                                        widget.onToggleSelection!,
-                                  ),
-                              ],
-                            );
-                          },
+                          builder: (context, child) => buildList(),
                         )
-                      : ListView(
-                          controller: controller,
-                          children: [
-                            for (final p in _filteredPairs(
-                              _buildPairs(widget.messages),
-                            ))
-                              _MiniMapRow(
-                                pair: p,
-                                selecting: widget.selecting,
-                                selectedMessageIds: widget.selectedMessageIds,
-                                onToggleSelection: widget.onToggleSelection,
-                              ),
-                          ],
-                        ),
+                      : buildList(),
                 ),
               ],
             ),
@@ -536,7 +532,7 @@ class _MiniMapRow extends StatelessWidget {
                             asstText.isNotEmpty ? _oneLine(asstText) : ' ',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(fontSize: 15.7, height: 1.5),
+                            style: TextStyle(fontSize: 15.7, height: 1.5),
                             textAlign: TextAlign.left,
                           ),
                         ),
@@ -560,7 +556,7 @@ class _MiniMapRow extends StatelessWidget {
                             asstText.isNotEmpty ? _oneLine(asstText) : ' ',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(fontSize: 15.7, height: 1.5),
+                            style: TextStyle(fontSize: 15.7, height: 1.5),
                             textAlign: TextAlign.left,
                           ),
                         ),

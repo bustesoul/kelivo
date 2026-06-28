@@ -11,7 +11,7 @@ Stream<ChatStreamChunk> _sendGoogleVertexStream(
   double? topP,
   int? maxTokens,
   List<Map<String, dynamic>>? tools,
-  Future<String> Function(String, Map<String, dynamic>)? onToolCall,
+  ToolCallHandler? onToolCall,
   Map<String, String>? extraHeaders,
   Map<String, dynamic>? extraBody,
   bool stream = true,
@@ -88,6 +88,9 @@ Future<String?> _maybeVertexAccessToken(ProviderConfig cfg) async {
 int _getMaxOutputTokensForClaudeModel(String modelId) {
   // Limits based on Google Vertex AI documentation
   switch (modelId) {
+    case 'claude-fable-5':
+    case 'claude-opus-4-8':
+    case 'claude-opus-4-7':
     case 'claude-opus-4-6':
     case 'claude-sonnet-4-6':
       return 128000;
@@ -121,35 +124,12 @@ Stream<ChatStreamChunk> _sendGoogleVertexClaudeStream({
   double? topP,
   int? maxTokens,
   List<Map<String, dynamic>>? tools,
-  Future<String> Function(String, Map<String, dynamic>)? onToolCall,
+  ToolCallHandler? onToolCall,
   Map<String, String>? extraHeaders,
   Map<String, dynamic>? extraBody,
   bool stream = true,
 }) async* {
   final upstreamId = _apiModelId(config, modelId);
-  bool supportsAdaptiveThinking(String id) {
-    final lower = id.toLowerCase();
-    if (!lower.contains('claude-')) return false;
-    final m = RegExp(
-      r'claude-(opus|sonnet)-(\d+)-(\d+)',
-      caseSensitive: false,
-    ).firstMatch(lower);
-    if (m != null) {
-      final major = int.tryParse(m.group(2) ?? '');
-      final minor = int.tryParse(m.group(3) ?? '');
-      if (major != null && minor != null) {
-        return major > 4 || (major == 4 && minor >= 6);
-      }
-    }
-    return lower.contains('4-6') || lower.contains('4.6');
-  }
-
-  String adaptiveEffort(int? budget) {
-    final effort = _effortForBudget(budget);
-    if (effort == 'auto') return 'medium';
-    return effort;
-  }
-
   final loc = (config.location ?? 'us-central1').trim();
   final proj = (config.projectId ?? '').trim();
   final endpoint = stream ? 'streamRawPredict' : 'rawPredict';
@@ -348,36 +328,36 @@ Stream<ChatStreamChunk> _sendGoogleVertexClaudeStream({
   TokenUsage? totalUsage;
 
   while (true) {
+    final omitSamplingParams = _claudeShouldOmitSamplingParams(
+      upstreamId,
+      effectiveThinkingBudget,
+    );
+    final compatibleTopP = _claudeCompatibleTopP(
+      upstreamId,
+      effectiveThinkingBudget,
+      topP,
+    );
+    final thinking = isReasoning
+        ? _claudeThinkingConfig(upstreamId, effectiveThinkingBudget)
+        : null;
+    final outputConfig = isReasoning
+        ? _claudeOutputConfig(upstreamId, effectiveThinkingBudget)
+        : null;
     final body = <String, dynamic>{
       'anthropic_version': 'vertex-2023-10-16',
       'messages': convo,
       'stream': stream,
       'max_tokens': effectiveMaxTokens,
       if (systemPrompt.isNotEmpty) 'system': systemPrompt,
-      if (temperature != null) 'temperature': temperature,
-      if (topP != null) 'top_p': topP,
+      if (!omitSamplingParams &&
+          !_isClaudeReasoningEnabled(effectiveThinkingBudget) &&
+          temperature != null)
+        'temperature': temperature,
+      if (compatibleTopP != null) 'top_p': compatibleTopP,
       if (allTools.isNotEmpty) 'tools': allTools,
       if (allTools.isNotEmpty) 'tool_choice': {'type': 'auto'},
-      if (isReasoning)
-        if (supportsAdaptiveThinking(upstreamId))
-          'thinking': {
-            'type': (effectiveThinkingBudget == 0) ? 'disabled' : 'adaptive',
-          }
-        else
-          'thinking': {
-            'type': (effectiveThinkingBudget == 0)
-                ? 'disabled'
-                : (effectiveThinkingBudget != null &&
-                        effectiveThinkingBudget > 0)
-                    ? 'enabled'
-                    : 'disabled',
-            if (effectiveThinkingBudget != null && effectiveThinkingBudget > 0)
-              'budget_tokens': effectiveThinkingBudget,
-          },
-      if (isReasoning &&
-          supportsAdaptiveThinking(upstreamId) &&
-          effectiveThinkingBudget != 0)
-        'output_config': {'effort': adaptiveEffort(effectiveThinkingBudget)},
+      if (thinking != null) 'thinking': thinking,
+      if (outputConfig != null) 'output_config': outputConfig,
     };
     if (extraBody != null) {
       extraBody.forEach((k, v) {
@@ -403,15 +383,9 @@ Stream<ChatStreamChunk> _sendGoogleVertexClaudeStream({
       try {
         final u = (obj['usage'] as Map?)?.cast<String, dynamic>();
         if (u != null) {
-          final inTok = (u['input_tokens'] ?? 0) as int? ?? 0;
-          final outTok = (u['output_tokens'] ?? 0) as int? ?? 0;
-          final round = TokenUsage(
-            promptTokens: inTok,
-            completionTokens: outTok,
-            cachedTokens: 0,
-            totalTokens: inTok + outTok,
+          totalUsage = (totalUsage ?? const TokenUsage()).merge(
+            _claudeUsageFromMap(u),
           );
-          totalUsage = (totalUsage ?? const TokenUsage()).merge(round);
         }
       } catch (_) {}
       final content = (obj['content'] as List?) ?? const <dynamic>[];
@@ -475,7 +449,7 @@ Stream<ChatStreamChunk> _sendGoogleVertexClaudeStream({
         for (final e in toolUses.entries) {
           final name = (e.value['name'] ?? '').toString();
           final args = (e.value['args'] as Map<String, dynamic>);
-          final res = await onToolCall(name, args);
+          final res = await onToolCall(name, args, toolCallId: e.key);
           results.add({
             'type': 'tool_result',
             'tool_use_id': e.key,
@@ -832,7 +806,7 @@ Stream<ChatStreamChunk> _sendGoogleVertexClaudeStream({
                 }
               }
               if (onToolCall != null) {
-                final res = await onToolCall(name, args);
+                final res = await onToolCall(name, args, toolCallId: id);
                 toolResultsContent[id] = res;
                 yield ChatStreamChunk(
                   content: '',
@@ -873,11 +847,9 @@ Stream<ChatStreamChunk> _sendGoogleVertexClaudeStream({
             }
           } else if (type == 'message_delta') {
             final u = obj['usage'] ?? obj['message']?['usage'];
-            if (u != null) {
-              final inTok = (u['input_tokens'] ?? 0) as int;
-              final outTok = (u['output_tokens'] ?? 0) as int;
+            if (u is Map) {
               usage = (usage ?? const TokenUsage()).merge(
-                TokenUsage(promptTokens: inTok, completionTokens: outTok),
+                _claudeUsageFromMap(u.cast<String, dynamic>()),
               );
               roundTokens = usage.totalTokens;
             }
@@ -904,13 +876,8 @@ Stream<ChatStreamChunk> _sendGoogleVertexClaudeStream({
     }
 
     if (anthToolUse.isEmpty) {
-      final hadServerTool =
-          assistantBlocks.any(
-            (b) => b['type'] == 'tool_use' || b['type'] == 'text',
-          ) &&
-          srvIndexToId.isNotEmpty;
       final sr = lastStopReason ?? '';
-      if (sr == 'pause_turn' || hadServerTool) {
+      if (sr == 'pause_turn') {
         // Continue this turn with assistant content only (not fully supported by Vertex streamRawPredict yet, but good for future proofing)
         convo = [
           ...convo,
@@ -942,7 +909,7 @@ Stream<ChatStreamChunk> _sendGoogleVertexClaudeStream({
       }
       String res = toolResultsContent[id] ?? '';
       if (res.isEmpty && onToolCall != null) {
-        res = await onToolCall(name, args);
+        res = await onToolCall(name, args, toolCallId: id);
       }
       toolResultsBlocks.add({
         'type': 'tool_result',

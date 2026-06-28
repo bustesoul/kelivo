@@ -20,6 +20,7 @@ import '../../../shared/widgets/ios_tactile.dart';
 import '../../../utils/sandbox_path_resolver.dart';
 import '../widgets/assistant_avatar.dart';
 import '../widgets/assistant_entry_actions.dart';
+import 'package:Kelivo/theme/app_font_weights.dart';
 
 /// Mobile layout scaffold for the home page
 /// This widget handles only the structural layout - AppBar, drawer, body structure
@@ -40,7 +41,10 @@ class HomeMobileScaffold extends StatelessWidget {
     required this.onNewConversation,
     required this.onOpenMiniMap,
     required this.onCreateNewConversation,
+    required this.onToggleTemporaryConversation,
     required this.onSelectModel,
+    required this.canToggleTemporaryConversation,
+    required this.temporaryConversationEnabled,
     required this.globalSearchMode,
     required this.globalSearchQuery,
     required this.onGlobalSearchQueryChanged,
@@ -64,7 +68,10 @@ class HomeMobileScaffold extends StatelessWidget {
   final VoidCallback onNewConversation;
   final VoidCallback onOpenMiniMap;
   final Future<void> Function() onCreateNewConversation;
+  final Future<void> Function() onToggleTemporaryConversation;
   final VoidCallback onSelectModel;
+  final bool canToggleTemporaryConversation;
+  final bool temporaryConversationEnabled;
   final bool globalSearchMode;
   final String globalSearchQuery;
   final ValueChanged<String> onGlobalSearchQueryChanged;
@@ -185,7 +192,7 @@ class HomeMobileScaffold extends StatelessWidget {
                         text: title,
                         style: TextStyle(
                           fontSize: isDesktopPlatform ? 14 : 16,
-                          fontWeight: FontWeight.w500,
+                          fontWeight: AppFontWeights.medium,
                         ),
                       ),
                       if (providerName != null && modelDisplay != null)
@@ -201,7 +208,7 @@ class HomeMobileScaffold extends StatelessWidget {
                                 style: TextStyle(
                                   fontSize: 11,
                                   color: cs.onSurface.withValues(alpha: 0.6),
-                                  fontWeight: FontWeight.w500,
+                                  fontWeight: AppFontWeights.medium,
                                 ),
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
@@ -222,7 +229,7 @@ class HomeMobileScaffold extends StatelessWidget {
                   text: title,
                   style: TextStyle(
                     fontSize: isDesktopPlatform ? 14 : 16,
-                    fontWeight: FontWeight.w500,
+                    fontWeight: AppFontWeights.medium,
                   ),
                 ),
                 if (providerName != null && modelDisplay != null)
@@ -238,7 +245,7 @@ class HomeMobileScaffold extends StatelessWidget {
                           style: TextStyle(
                             fontSize: 11,
                             color: cs.onSurface.withValues(alpha: 0.6),
-                            fontWeight: FontWeight.w500,
+                            fontWeight: AppFontWeights.medium,
                           ),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
@@ -260,9 +267,27 @@ class HomeMobileScaffold extends StatelessWidget {
           size: 22,
           minSize: 44,
           onTap: () async {
-            await onCreateNewConversation();
+            if (canToggleTemporaryConversation) {
+              await onToggleTemporaryConversation();
+            } else {
+              await onCreateNewConversation();
+            }
           },
-          icon: Lucide.MessageCirclePlus,
+          semanticLabel: canToggleTemporaryConversation
+              ? AppLocalizations.of(context)!.temporaryChatToggleTooltip
+              : AppLocalizations.of(context)!.titleForLocale,
+          icon: canToggleTemporaryConversation && !temporaryConversationEnabled
+              ? Lucide.MessageCircleDashed
+              : Lucide.MessageCirclePlus,
+          builder:
+              canToggleTemporaryConversation && temporaryConversationEnabled
+              ? (color) => SvgPicture.asset(
+                  'assets/icons/temporary_chat_checked.svg',
+                  width: 22,
+                  height: 22,
+                  colorFilter: ColorFilter.mode(color, BlendMode.srcIn),
+                )
+              : null,
         ),
         const SizedBox(width: 4),
       ],

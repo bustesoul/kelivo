@@ -83,20 +83,24 @@ class S3BackupProvider extends ChangeNotifier {
     }
   }
 
-  Future<void> backup() async {
+  Future<bool> backup() async {
     _busy = true;
     _message = null;
     notifyListeners();
+    File? file;
     try {
-      final file = await _dataSync.prepareBackupFile(_scopeAsWebdavConfig());
+      file = await _dataSync.prepareBackupFile(_scopeAsWebdavConfig());
       final prefix = _normalizePrefix(_cfg.prefix);
       final key = '$prefix${p.basename(file.path)}';
       // Use file-stream upload to avoid loading entire ZIP into memory.
       await _client.uploadFile(_cfg, key: key, file: file);
       _message = 'Backup uploaded';
+      return true;
     } catch (e) {
       _message = e.toString();
+      return false;
     } finally {
+      await DataSync.cleanupTemporaryBackupFile(file);
       _busy = false;
       notifyListeners();
     }
@@ -113,10 +117,11 @@ class S3BackupProvider extends ChangeNotifier {
     _busy = true;
     _message = null;
     notifyListeners();
+    File? file;
     try {
       final key = _keyFromItem(item);
       final tmp = await _ensureTempDir();
-      final file = File(p.join(tmp.path, item.displayName));
+      file = File(p.join(tmp.path, item.displayName));
       // Download directly to file to avoid holding entire object in memory.
       await _client.downloadToFile(_cfg, key: key, destination: file);
       await _dataSync.restoreFromLocalFile(
@@ -124,13 +129,15 @@ class S3BackupProvider extends ChangeNotifier {
         _scopeAsWebdavConfig(),
         mode: mode,
       );
-      try {
-        await file.delete();
-      } catch (_) {}
       _message = 'Restored';
     } catch (e) {
       _message = e.toString();
     } finally {
+      try {
+        if (file != null && await file.exists()) {
+          await file.delete();
+        }
+      } catch (_) {}
       _busy = false;
       notifyListeners();
     }

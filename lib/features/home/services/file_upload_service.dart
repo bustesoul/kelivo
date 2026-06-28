@@ -1,10 +1,12 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:image_cropper/image_cropper.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:path/path.dart' as p;
+import 'package:shared_preferences/shared_preferences.dart';
 import '../../../l10n/app_localizations.dart';
 import '../../../utils/app_directories.dart';
 import '../../../utils/file_import_helper.dart';
@@ -22,20 +24,15 @@ import '../widgets/chat_input_bar.dart';
 /// - 桌面拖放处理
 /// - 文件复制到应用目录
 class FileUploadService {
-  FileUploadService({
-    required BuildContext Function() getContext,
-    required this.mediaController,
-    required this.onScrollToBottom,
-  }) : _getContext = getContext;
+  FileUploadService({required this.getContext, required this.mediaController});
 
   /// 媒体控制器，用于添加图片和文件到输入栏
   final ChatInputBarController mediaController;
 
   /// Context provider callback to avoid storing stale context
-  final BuildContext Function() _getContext;
+  final BuildContext Function() getContext;
 
-  /// 滚动到底部的回调
-  final VoidCallback onScrollToBottom;
+  static const String _imageCropperEnabledKey = 'image_cropper_enabled_v1';
 
   /// 复制选中的文件到应用上传目录
   ///
@@ -44,7 +41,7 @@ class FileUploadService {
   Future<List<String>> copyPickedFiles(List<XFile> files) async {
     final dir = await AppDirectories.getUploadDirectory();
     final out = <String>[];
-    final context = _getContext();
+    final context = getContext();
     if (!context.mounted) return out;
     for (final f in files) {
       final savedPath = await FileImportHelper.copyXFile(f, dir, context);
@@ -82,10 +79,11 @@ class FileUploadService {
           }
         }
         if (toCopy.isEmpty) return;
-        final paths = await copyPickedFiles(toCopy);
+        final croppedFiles = await _maybeCropImages(toCopy);
+        if (croppedFiles.isEmpty) return;
+        final paths = await copyPickedFiles(croppedFiles);
         if (paths.isNotEmpty) {
           mediaController.addImages(paths);
-          onScrollToBottom();
         }
         return;
       }
@@ -93,10 +91,11 @@ class FileUploadService {
       final picker = ImagePicker();
       final files = await picker.pickMultiImage();
       if (files.isEmpty) return;
-      final paths = await copyPickedFiles(files);
+      final croppedFiles = await _maybeCropImages(files);
+      if (croppedFiles.isEmpty) return;
+      final paths = await copyPickedFiles(croppedFiles);
       if (paths.isNotEmpty) {
         mediaController.addImages(paths);
-        onScrollToBottom();
       }
     } catch (_) {}
   }
@@ -134,11 +133,12 @@ class FileUploadService {
       final picker = ImagePicker();
       final file = await picker.pickImage(source: ImageSource.camera);
       if (file == null) return;
-      final paths = await copyPickedFiles([file]);
+      final croppedFiles = await _maybeCropImages([file]);
+      if (croppedFiles.isEmpty) return;
+      final paths = await copyPickedFiles(croppedFiles);
       if (paths.isNotEmpty) {
         if (!context.mounted) return;
         mediaController.addImages(paths);
-        onScrollToBottom();
       }
     } catch (e) {
       try {
@@ -152,6 +152,46 @@ class FileUploadService {
         );
       } catch (_) {}
     }
+  }
+
+  Future<List<XFile>> _maybeCropImages(List<XFile> files) async {
+    final prefs = await SharedPreferences.getInstance();
+    final enabled = prefs.getBool(_imageCropperEnabledKey) ?? false;
+    if (!enabled) return files;
+
+    final context = getContext();
+    if (!context.mounted) return files;
+    final l10n = AppLocalizations.of(context)!;
+    final cs = Theme.of(context).colorScheme;
+    final croppedFiles = <XFile>[];
+
+    for (final file in files) {
+      try {
+        final croppedFile = await ImageCropper().cropImage(
+          sourcePath: file.path,
+          uiSettings: [
+            AndroidUiSettings(
+              toolbarTitle: l10n.displaySettingsPageEnableImageCropperTitle,
+              toolbarColor: cs.surface,
+              toolbarWidgetColor: cs.onSurface,
+              activeControlsWidgetColor: cs.primary,
+              initAspectRatio: CropAspectRatioPreset.original,
+              lockAspectRatio: false,
+            ),
+            IOSUiSettings(
+              title: l10n.displaySettingsPageEnableImageCropperTitle,
+            ),
+          ],
+        );
+        if (croppedFile != null) {
+          croppedFiles.add(XFile(croppedFile.path));
+        }
+      } catch (_) {
+        croppedFiles.add(file);
+      }
+    }
+
+    return croppedFiles;
   }
 
   /// 根据文件扩展名推断 MIME 类型
@@ -271,9 +311,6 @@ class FileUploadService {
       if (docs.isNotEmpty) {
         mediaController.addFiles(docs);
       }
-      if (images.isNotEmpty || docs.isNotEmpty) {
-        onScrollToBottom();
-      }
     } catch (_) {}
   }
 
@@ -316,7 +353,6 @@ class FileUploadService {
       }
       if (images.isNotEmpty) mediaController.addImages(images);
       if (docs.isNotEmpty) mediaController.addFiles(docs);
-      if (images.isNotEmpty || docs.isNotEmpty) onScrollToBottom();
     } catch (_) {}
   }
 }
