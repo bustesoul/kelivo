@@ -201,6 +201,7 @@ class _DesktopProvidersBodyState extends State<_DesktopProvidersBody> {
     required ({String name, String key}) item,
     required SettingsProvider settings,
     required List<({String name, String key})> ordered,
+    required Set<String> baseKeys,
     required ColorScheme colorScheme,
   }) {
     final cfg = settings.getProviderConfig(item.key, defaultName: item.name);
@@ -235,53 +236,51 @@ class _DesktopProvidersBodyState extends State<_DesktopProvidersBody> {
         });
       },
       onDelete: () async {
-              final l10n = AppLocalizations.of(context)!;
-              final ap = context.read<AssistantProvider>();
-              final chatService = context.read<ChatService>();
-              final ok = await showDialog<bool>(
-                context: context,
-                builder: (ctx) => AlertDialog(
-                  title: Text(l10n.providerDetailPageDeleteProviderTitle),
-                  content: Text(l10n.providerDetailPageDeleteProviderContent),
-                  actions: [
-                    TextButton(
-                      onPressed: () => Navigator.of(ctx).pop(false),
-                      child: Text(l10n.providerDetailPageCancelButton),
-                    ),
-                    TextButton(
-                      onPressed: () => Navigator.of(ctx).pop(true),
-                      child: Text(
-                        l10n.providerDetailPageDeleteButton,
-                        style: TextStyle(
-                          color: Theme.of(context).colorScheme.error,
-                        ),
-                      ),
-                    ),
-                  ],
+        final l10n = AppLocalizations.of(context)!;
+        final ap = context.read<AssistantProvider>();
+        final chatService = context.read<ChatService>();
+        final ok = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: Text(l10n.providerDetailPageDeleteProviderTitle),
+            content: Text(l10n.providerDetailPageDeleteProviderContent),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                child: Text(l10n.providerDetailPageCancelButton),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(true),
+                child: Text(
+                  l10n.providerDetailPageDeleteButton,
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
                 ),
+              ),
+            ],
+          ),
+        );
+        if (ok != true) return;
+        try {
+          for (final assistant in ap.assistants) {
+            if (assistant.chatModelProvider == item.key) {
+              await ap.updateAssistant(
+                assistant.copyWith(clearChatModel: true),
               );
-              if (ok != true) return;
-              try {
-                for (final assistant in ap.assistants) {
-                  if (assistant.chatModelProvider == item.key) {
-                    await ap.updateAssistant(
-                      assistant.copyWith(clearChatModel: true),
-                    );
-                  }
-                }
-                // Conversations can pin a model too.
-                await chatService.clearConversationModelOverrides(
-                  providerKey: item.key,
-                );
-              } catch (_) {}
-              await settings.removeProviderConfig(item.key);
-              if (!mounted) return;
-              setState(() {
-                if (_selectedKey == item.key) {
-                  _selectedKey = ordered.isNotEmpty ? ordered.first.key : null;
-                }
-              });
-            },
+            }
+          }
+          // Conversations can pin a model too.
+          await chatService.clearConversationModelOverrides(
+            providerKey: item.key,
+          );
+        } catch (_) {}
+        await settings.removeProviderConfig(item.key);
+        if (!mounted) return;
+        setState(() {
+          if (_selectedKey == item.key) {
+            _selectedKey = ordered.isNotEmpty ? ordered.first.key : null;
+          }
+        });
+      },
     );
   }
 
@@ -310,11 +309,8 @@ class _DesktopProvidersBodyState extends State<_DesktopProvidersBody> {
       (name: l10n.providersPageByteDanceName, key: 'ByteDance'),
     ];
 
-    final baseItems = base()
-        .where((p) => !settings.isBuiltInProviderRemoved(p.key))
-        .toList();
     final cfgs = settings.providerConfigs;
-    final baseKeys = {for (final p in baseItems) p.key};
+    final baseKeys = {for (final p in base()) p.key};
     final dynamicItems = <({String name, String key})>[];
     cfgs.forEach((key, cfg) {
       if (!baseKeys.contains(key)) {
@@ -325,7 +321,7 @@ class _DesktopProvidersBodyState extends State<_DesktopProvidersBody> {
       }
     });
     // Apply saved order
-    final merged = <({String name, String key})>[...baseItems, ...dynamicItems];
+    final merged = <({String name, String key})>[...base(), ...dynamicItems];
     final order = settings.providersOrder;
     final map = {for (final p in merged) p.key: p};
     final ordered = <({String name, String key})>[];
@@ -625,6 +621,7 @@ class _DesktopProvidersBodyState extends State<_DesktopProvidersBody> {
                                                       item: row.item,
                                                       settings: settings,
                                                       ordered: ordered,
+                                                      baseKeys: baseKeys,
                                                       colorScheme: cs,
                                                     )
                                                   : ReorderableDragStartListener(
@@ -634,6 +631,7 @@ class _DesktopProvidersBodyState extends State<_DesktopProvidersBody> {
                                                             item: row.item,
                                                             settings: settings,
                                                             ordered: ordered,
+                                                            baseKeys: baseKeys,
                                                             colorScheme: cs,
                                                           ),
                                                     ),
@@ -676,6 +674,7 @@ class _DesktopProvidersBodyState extends State<_DesktopProvidersBody> {
                                   item: item,
                                   settings: settings,
                                   ordered: ordered,
+                                  baseKeys: baseKeys,
                                   colorScheme: cs,
                                 );
                                 return KeyedSubtree(
@@ -953,10 +952,9 @@ class _DesktopProviderDetailPaneState extends State<DesktopProviderDetailPane> {
   final Set<String> _selectedModels = {};
   bool _isDetecting = false;
   bool _detectUseStream = false;
-  bool _detectUseConcurrent = true;
   final Map<String, bool> _detectionResults = {};
   final Map<String, String> _detectionErrorMessages = {};
-  final Set<String> _detectingModels = {};
+  String? _currentDetectingModel;
   final Set<String> _pendingModels = {};
   int _providerScopedStateEpoch = 0;
 
@@ -2055,31 +2053,6 @@ class _DesktopProviderDetailPaneState extends State<DesktopProviderDetailPane> {
                     ),
                     const SizedBox(width: 6),
                     Tooltip(
-                      message: l10n.providerDetailPageUseConcurrentLabel,
-                      child: GestureDetector(
-                        onTap: () => setState(
-                          () => _detectUseConcurrent = !_detectUseConcurrent,
-                        ),
-                        child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 180),
-                          curve: Curves.easeOutCubic,
-                          padding: const EdgeInsets.all(6),
-                          decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(8),
-                            color: _detectUseConcurrent
-                                ? cs.onSurface.withValues(alpha: 0.08)
-                                : Colors.transparent,
-                          ),
-                          child: Icon(
-                            lucide.Lucide.Layers,
-                            size: 18,
-                            color: cs.onSurface.withValues(alpha: 0.85),
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 6),
-                    Tooltip(
                       message: _isDetecting
                           ? l10n.providerDetailPageBatchDetecting
                           : l10n.providerDetailPageBatchDetectStart,
@@ -2200,7 +2173,7 @@ class _DesktopProviderDetailPaneState extends State<DesktopProviderDetailPane> {
                     },
                     detectionResults: _detectionResults,
                     detectionErrorMessages: _detectionErrorMessages,
-                    detectingModels: _detectingModels,
+                    currentDetectingModel: _currentDetectingModel,
                     pendingModels: _pendingModels,
                   ),
                 ),
@@ -4996,10 +4969,6 @@ class _DesktopProviderDetailPaneState extends State<DesktopProviderDetailPane> {
     setState(() {
       _isSelectionMode = true;
       _selectedModels.clear();
-      _detectionResults.clear();
-      _detectionErrorMessages.clear();
-      _detectingModels.clear();
-      _pendingModels.clear();
     });
   }
 
@@ -5007,10 +4976,6 @@ class _DesktopProviderDetailPaneState extends State<DesktopProviderDetailPane> {
     setState(() {
       _isSelectionMode = false;
       _selectedModels.clear();
-      _detectionResults.clear();
-      _detectionErrorMessages.clear();
-      _detectingModels.clear();
-      _pendingModels.clear();
     });
   }
 
@@ -5309,8 +5274,8 @@ class _DesktopProviderDetailPaneState extends State<DesktopProviderDetailPane> {
       _selectedModels.clear();
       _detectionResults.clear();
       _detectionErrorMessages.clear();
-      _detectingModels.clear();
       _pendingModels.clear();
+      _currentDetectingModel = null;
       _isSelectionMode = false;
     });
   }
@@ -5318,17 +5283,16 @@ class _DesktopProviderDetailPaneState extends State<DesktopProviderDetailPane> {
   Future<void> _startDetection() async {
     if (_selectedModels.isEmpty || _isDetecting) return;
 
-    final modelsToTest = List<String>.from(_selectedModels);
+    final modelsToTest = Set<String>.from(_selectedModels);
+    final detectionEpoch = _providerScopedStateEpoch;
 
     setState(() {
       _isDetecting = true;
-      _detectionResults.clear();
-      _detectionErrorMessages.clear();
-      _isSelectionMode = false;
-      _selectedModels.clear();
-      _detectingModels.clear();
+      _detectionResults.removeWhere((id, _) => modelsToTest.contains(id));
+      _detectionErrorMessages.removeWhere((id, _) => modelsToTest.contains(id));
       _pendingModels.clear();
       _pendingModels.addAll(modelsToTest);
+      _currentDetectingModel = null;
     });
 
     final sp = context.read<SettingsProvider>();
@@ -5337,43 +5301,42 @@ class _DesktopProviderDetailPaneState extends State<DesktopProviderDetailPane> {
       defaultName: widget.displayName,
     );
 
-    await ProviderModelBatchTestRunner.run(
-      modelIds: modelsToTest,
-      useConcurrent: _detectUseConcurrent,
-      tester: (modelId) => ProviderManager.testConnection(
-        cfg,
-        modelId,
-        useStream: _detectUseStream,
-      ),
-      onModelStarted: (modelId) {
-        if (!mounted) return;
+    for (final modelId in modelsToTest) {
+      if (!mounted || detectionEpoch != _providerScopedStateEpoch) return;
+      if (mounted) {
         setState(() {
+          _currentDetectingModel = modelId;
           _pendingModels.remove(modelId);
-          _detectingModels.add(modelId);
         });
-      },
-      onModelSucceeded: (modelId) {
-        if (!mounted) return;
-        setState(() {
-          _detectingModels.remove(modelId);
-          _detectionResults[modelId] = true;
-          _detectionErrorMessages.remove(modelId);
-        });
-      },
-      onModelFailed: (modelId, error) {
-        if (!mounted) return;
-        setState(() {
-          _detectingModels.remove(modelId);
-          _detectionResults[modelId] = false;
-          _detectionErrorMessages[modelId] = error.toString();
-        });
-      },
-    );
+      }
+
+      try {
+        await ProviderManager.testConnection(
+          cfg,
+          modelId,
+          useStream: _detectUseStream,
+        );
+        if (mounted && detectionEpoch == _providerScopedStateEpoch) {
+          setState(() {
+            _detectionResults[modelId] = true;
+            _detectionErrorMessages.remove(modelId);
+          });
+        }
+      } catch (e) {
+        if (mounted && detectionEpoch == _providerScopedStateEpoch) {
+          setState(() {
+            _detectionResults[modelId] = false;
+            _detectionErrorMessages[modelId] = e.toString();
+          });
+        }
+      }
+      await Future.delayed(const Duration(milliseconds: 500));
+    }
 
     if (mounted && detectionEpoch == _providerScopedStateEpoch) {
       setState(() {
         _isDetecting = false;
-        _detectingModels.clear();
+        _currentDetectingModel = null;
         _pendingModels.clear();
       });
     }
@@ -6930,7 +6893,7 @@ class _ModelGroupAccordion extends StatefulWidget {
     this.onSelectionChanged,
     this.detectionResults = const {},
     this.detectionErrorMessages = const {},
-    this.detectingModels = const {},
+    this.currentDetectingModel,
     this.pendingModels = const {},
   });
   final String group;
@@ -6941,7 +6904,7 @@ class _ModelGroupAccordion extends StatefulWidget {
   final Map<String, String> detectionErrorMessages;
   final ValueChanged<Set<String>>? onSelectionChanged;
   final Map<String, bool> detectionResults;
-  final Set<String> detectingModels;
+  final String? currentDetectingModel;
   final Set<String> pendingModels;
   @override
   State<_ModelGroupAccordion> createState() => _ModelGroupAccordionState();
@@ -7035,7 +6998,7 @@ class _ModelGroupAccordionState extends State<_ModelGroupAccordion> {
                       },
                       detectionErrorMessage: widget.detectionErrorMessages[id],
                       detectionResult: widget.detectionResults[id],
-                      isDetecting: widget.detectingModels.contains(id),
+                      isDetecting: widget.currentDetectingModel == id,
                       isPending: widget.pendingModels.contains(id),
                     ),
                 ],

@@ -81,6 +81,7 @@ import '../features/provider/widgets/provider_avatar.dart';
 import '../features/provider/widgets/provider_balance_badge.dart';
 import '../features/provider/widgets/provider_custom_request_editor.dart';
 import '../features/provider/utils/provider_model_batch_test_runner.dart';
+import '../features/provider/widgets/provider_balance_badge.dart';
 import '../features/provider/widgets/share_provider_sheet.dart'
     show encodeProviderConfig;
 import '../utils/clipboard_images.dart';

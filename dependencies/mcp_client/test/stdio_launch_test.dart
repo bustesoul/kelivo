@@ -88,14 +88,14 @@ void main() {
       final plan = resolveStdioLaunch(
         'npx',
         ['-y', 'pkg'],
-        environment: const {'PATH': r'C:\Program Files\nodejs'},
+        environment: const {'PATH': r'C:\Tools\FakeNode'},
         isWindows: true,
         resolveWindowsPath:
             (command, {path, pathExt, isWindows}) =>
-                r'C:\Program Files\nodejs\npx.cmd',
+                r'C:\Tools\FakeNode\npx.cmd',
       );
 
-      expect(plan.executableCommand, r'C:\Program Files\nodejs\npx.cmd');
+      expect(plan.executableCommand, r'C:\Tools\FakeNode\npx.cmd');
       expect(plan.effectiveArgs, ['-y', 'pkg']);
     });
 

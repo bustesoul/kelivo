@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -204,14 +205,14 @@ class _DesktopAboutPaneState extends State<DesktopAboutPane> {
                     svgAsset: 'assets/icons/github.svg',
                     label: l10n.aboutPageGithub,
                     onTap: () =>
-                        _openUrl('https://github.com/bustezero/kelivo'),
+                        _openUrl('https://github.com/Chevey339/kelivo'),
                   ),
                   const _DeskRowDivider(),
                   _DeskNavRow(
                     icon: lucide.Lucide.FileText,
                     label: l10n.aboutPageLicense,
                     onTap: () => _openUrl(
-                      'https://github.com/bustezero/kelivo/blob/master/LICENSE',
+                      'https://github.com/Chevey339/kelivo/blob/master/LICENSE',
                     ),
                   ),
                   const _DeskRowDivider(),
@@ -225,7 +226,6 @@ class _DesktopAboutPaneState extends State<DesktopAboutPane> {
                     svgAsset: 'assets/icons/discord.svg',
                     label: l10n.aboutPageJoinDiscord,
                     onTap: () => _openUrl('https://discord.gg/Tb8DyvvV5T'),
-                  ),
                   ),
                 ],
               ),
