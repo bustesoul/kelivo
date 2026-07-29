@@ -9,6 +9,8 @@ import '../l10n/app_localizations.dart';
 import '../icons/lucide_adapter.dart' as lucide;
 import '../core/providers/settings_provider.dart';
 import '../theme/app_font_weights.dart';
+import '../features/provider/utils/quick_provider_config_parser.dart';
+import '../shared/widgets/snackbar.dart';
 
 Future<String?> showDesktopAddProviderDialog(BuildContext context) async {
   String? result;
@@ -190,6 +192,119 @@ class _AddProviderDialogBodyState extends State<_AddProviderDialogBody>
     } catch (_) {}
   }
 
+  /// Opens the desktop "quick add" dialog: parses the pasted JSON and fills the
+  /// matching form fields. Only fills the form — the user still taps "Add".
+  void _showQuickAdd() {
+    final l10n = AppLocalizations.of(context)!;
+    final controller = TextEditingController();
+
+    void apply(QuickProviderConfig cfg) {
+      final idx = cfg.kind == QuickProviderKind.google
+          ? 1
+          : cfg.kind == QuickProviderKind.claude
+          ? 2
+          : 0;
+      _tab.animateTo(idx);
+
+      switch (cfg.kind) {
+        case QuickProviderKind.openai:
+          if (cfg.apiKey != null) _openaiKey.text = cfg.apiKey!;
+          if (cfg.baseUrl != null) _openaiBase.text = cfg.baseUrl!;
+          if (cfg.apiPath != null) _openaiPath.text = cfg.apiPath!;
+          if (cfg.name != null &&
+              (_openaiName.text.trim().isEmpty ||
+                  _openaiName.text.trim() == 'OpenAI')) {
+            _openaiName.text = cfg.name!;
+          }
+          break;
+        case QuickProviderKind.google:
+          if (cfg.apiKey != null) _googleKey.text = cfg.apiKey!;
+          if (cfg.baseUrl != null) _googleBase.text = cfg.baseUrl!;
+          if (cfg.location != null) _googleLocation.text = cfg.location!;
+          if (cfg.projectId != null) _googleProject.text = cfg.projectId!;
+          if (cfg.serviceAccountJson != null) {
+            _googleSaJson.text = cfg.serviceAccountJson!;
+          }
+          if (cfg.name != null &&
+              (_googleName.text.trim().isEmpty ||
+                  _googleName.text.trim() == 'Google')) {
+            _googleName.text = cfg.name!;
+          }
+          break;
+        case QuickProviderKind.claude:
+          if (cfg.apiKey != null) _claudeKey.text = cfg.apiKey!;
+          if (cfg.baseUrl != null) _claudeBase.text = cfg.baseUrl!;
+          if (cfg.name != null &&
+              (_claudeName.text.trim().isEmpty ||
+                  _claudeName.text.trim() == 'Claude')) {
+            _claudeName.text = cfg.name!;
+          }
+          break;
+      }
+      setState(() {});
+      showAppSnackBar(
+        context,
+        message: l10n.addProviderSheetQuickAddApplied,
+        type: NotificationType.success,
+      );
+    }
+
+    showDialog<void>(
+      context: context,
+      builder: (dialogCtx) {
+        final dialogL10n = AppLocalizations.of(dialogCtx)!;
+        return AlertDialog(
+          title: Text(dialogL10n.addProviderSheetQuickAddTitle),
+          content: SizedBox(
+            width: 420,
+            child: TextField(
+              controller: controller,
+              minLines: 6,
+              maxLines: 12,
+              autofocus: true,
+              decoration: _deskInputDecoration(
+                dialogCtx,
+                hint: dialogL10n.addProviderSheetQuickAddHint,
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogCtx).pop(),
+              child: Text(dialogL10n.addProviderSheetCancelButton),
+            ),
+            FilledButton(
+              onPressed: () {
+                final raw = controller.text;
+                final error = quickParseError(raw);
+                if (error != null) {
+                  showAppSnackBar(
+                    dialogCtx,
+                    message: dialogL10n.addProviderSheetQuickAddInvalid(error),
+                    type: NotificationType.error,
+                  );
+                  return;
+                }
+                final cfg = parseQuickProviderConfig(raw);
+                if (cfg == null) {
+                  showAppSnackBar(
+                    dialogCtx,
+                    message: dialogL10n.addProviderSheetQuickAddInvalid('?'),
+                    type: NotificationType.error,
+                  );
+                  return;
+                }
+                apply(cfg);
+                Navigator.of(dialogCtx).pop();
+              },
+              child: Text(dialogL10n.addProviderSheetConfirmButton),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   Future<void> _onAdd() async {
     final settings = context.read<SettingsProvider>();
     String uniqueKey(String prefix, String display) {
@@ -360,6 +475,15 @@ class _AddProviderDialogBodyState extends State<_AddProviderDialogBody>
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),
+                      ),
+                      IconButton(
+                        tooltip: l10n.addProviderSheetQuickAddTooltip,
+                        icon: Icon(
+                          lucide.Lucide.ClipboardPaste,
+                          size: 20,
+                          color: cs.onSurface.withValues(alpha: 0.9),
+                        ),
+                        onPressed: _showQuickAdd,
                       ),
                       IconButton(
                         tooltip: l10n.mcpPageClose,

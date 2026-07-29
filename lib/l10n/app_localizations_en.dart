@@ -3513,6 +3513,28 @@ class AppLocalizationsEn extends AppLocalizations {
   String get addProviderSheetCancelButton => 'Cancel';
 
   @override
+  String get addProviderSheetConfirmButton => 'Confirm';
+
+  @override
+  String get addProviderSheetQuickAddTooltip => 'Quick Add';
+
+  @override
+  String get addProviderSheetQuickAddTitle => 'Paste Config';
+
+  @override
+  String get addProviderSheetQuickAddHint =>
+      'Paste provider config (NewAPI / OneAPI compatible), e.g. newapi_channel_conn with key and url';
+
+  @override
+  String get addProviderSheetQuickAddApplied =>
+      'Filled the form. Confirm and add.';
+
+  @override
+  String addProviderSheetQuickAddInvalid(String error) {
+    return 'Unrecognized config: $error';
+  }
+
+  @override
   String get addProviderSheetAddButton => 'Add';
 
   @override

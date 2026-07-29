@@ -3386,6 +3386,27 @@ class AppLocalizationsZh extends AppLocalizations {
   String get addProviderSheetCancelButton => '取消';
 
   @override
+  String get addProviderSheetConfirmButton => '确认';
+
+  @override
+  String get addProviderSheetQuickAddTooltip => '快捷添加';
+
+  @override
+  String get addProviderSheetQuickAddTitle => '粘贴配置';
+
+  @override
+  String get addProviderSheetQuickAddHint =>
+      '粘贴供应商配置（支持 NewAPI / OneAPI 格式），例如 newapi_channel_conn 的 key 和 url';
+
+  @override
+  String get addProviderSheetQuickAddApplied => '已填入表单，请确认后添加';
+
+  @override
+  String addProviderSheetQuickAddInvalid(String error) {
+    return '无法识别的配置：$error';
+  }
+
+  @override
   String get addProviderSheetAddButton => '添加';
 
   @override
@@ -8980,6 +9001,27 @@ class AppLocalizationsZhHans extends AppLocalizationsZh {
   String get addProviderSheetCancelButton => '取消';
 
   @override
+  String get addProviderSheetConfirmButton => '确认';
+
+  @override
+  String get addProviderSheetQuickAddTooltip => '快捷添加';
+
+  @override
+  String get addProviderSheetQuickAddTitle => '粘贴配置';
+
+  @override
+  String get addProviderSheetQuickAddHint =>
+      '粘贴供应商配置（支持 NewAPI / OneAPI 格式），例如 newapi_channel_conn 的 key 和 url';
+
+  @override
+  String get addProviderSheetQuickAddApplied => '已填入表单，请确认后添加';
+
+  @override
+  String addProviderSheetQuickAddInvalid(String error) {
+    return '无法识别的配置：$error';
+  }
+
+  @override
   String get addProviderSheetAddButton => '添加';
 
   @override
@@ -14571,6 +14613,27 @@ class AppLocalizationsZhHant extends AppLocalizationsZh {
 
   @override
   String get addProviderSheetCancelButton => '取消';
+
+  @override
+  String get addProviderSheetConfirmButton => '確認';
+
+  @override
+  String get addProviderSheetQuickAddTooltip => '快捷新增';
+
+  @override
+  String get addProviderSheetQuickAddTitle => '貼上設定';
+
+  @override
+  String get addProviderSheetQuickAddHint =>
+      '貼上供應商設定（支援 NewAPI / OneAPI 格式），例如 newapi_channel_conn 的 key 和 url';
+
+  @override
+  String get addProviderSheetQuickAddApplied => '已填入表單，請確認後新增';
+
+  @override
+  String addProviderSheetQuickAddInvalid(String error) {
+    return '無法識別的設定：$error';
+  }
 
   @override
   String get addProviderSheetAddButton => '新增';

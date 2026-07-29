@@ -1498,6 +1498,19 @@
   "addProviderSheetVertexAiServiceAccountJsonLabel": "Service Account JSON (paste or import)",
   "addProviderSheetImportJsonButton": "Import JSON",
   "addProviderSheetCancelButton": "Cancel",
+  "addProviderSheetConfirmButton": "Confirm",
+  "addProviderSheetQuickAddTooltip": "Quick Add",
+  "addProviderSheetQuickAddTitle": "Paste Config",
+  "addProviderSheetQuickAddHint": "Paste provider config (NewAPI / OneAPI compatible), e.g. newapi_channel_conn with key and url",
+  "addProviderSheetQuickAddApplied": "Filled the form. Confirm and add.",
+  "addProviderSheetQuickAddInvalid": "Unrecognized config: {error}",
+  "@addProviderSheetQuickAddInvalid": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
   "addProviderSheetAddButton": "Add",
   "importProviderSheetTitle": "Import Provider",
   "importProviderSheetScanQrTooltip": "Scan QR",

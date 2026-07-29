@@ -6548,6 +6548,42 @@ abstract class AppLocalizations {
   /// **'Cancel'**
   String get addProviderSheetCancelButton;
 
+  /// No description provided for @addProviderSheetConfirmButton.
+  ///
+  /// In en, this message translates to:
+  /// **'Confirm'**
+  String get addProviderSheetConfirmButton;
+
+  /// No description provided for @addProviderSheetQuickAddTooltip.
+  ///
+  /// In en, this message translates to:
+  /// **'Quick Add'**
+  String get addProviderSheetQuickAddTooltip;
+
+  /// No description provided for @addProviderSheetQuickAddTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Paste Config'**
+  String get addProviderSheetQuickAddTitle;
+
+  /// No description provided for @addProviderSheetQuickAddHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Paste provider config (NewAPI / OneAPI compatible), e.g. newapi_channel_conn with key and url'**
+  String get addProviderSheetQuickAddHint;
+
+  /// No description provided for @addProviderSheetQuickAddApplied.
+  ///
+  /// In en, this message translates to:
+  /// **'Filled the form. Confirm and add.'**
+  String get addProviderSheetQuickAddApplied;
+
+  /// No description provided for @addProviderSheetQuickAddInvalid.
+  ///
+  /// In en, this message translates to:
+  /// **'Unrecognized config: {error}'**
+  String addProviderSheetQuickAddInvalid(String error);
+
   /// No description provided for @addProviderSheetAddButton.
   ///
   /// In en, this message translates to:

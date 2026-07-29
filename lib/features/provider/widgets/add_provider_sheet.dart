@@ -11,6 +11,8 @@ import '../../../l10n/app_localizations.dart';
 import '../../../core/services/haptics.dart';
 import '../../../shared/widgets/ios_tile_button.dart';
 import 'package:Kelivo/theme/app_font_weights.dart';
+import '../utils/quick_provider_config_parser.dart';
+import '../../../shared/widgets/snackbar.dart';
 
 Future<String?> showAddProviderSheet(BuildContext context) async {
   final cs = Theme.of(context).colorScheme;
@@ -318,6 +320,159 @@ class _AddProviderSheetState extends State<_AddProviderSheet>
     );
   }
 
+  /// Opens the "quick add" paste sheet: parses the pasted JSON and fills the
+  /// matching form fields. Only fills the form — the user still taps "Add".
+  void _showQuickAdd() {
+    final l10n = AppLocalizations.of(context)!;
+    final cs = Theme.of(context).colorScheme;
+    final controller = TextEditingController();
+
+    void apply(QuickProviderConfig cfg) {
+      // Switch to the inferred type's tab.
+      final idx = cfg.kind == QuickProviderKind.google
+          ? 1
+          : cfg.kind == QuickProviderKind.claude
+          ? 2
+          : 0;
+      _tab.animateTo(idx);
+
+      // Fill recognized fields per type. Non-null fields overwrite (the user's
+      // intent with quick-add is to fill these); Name is only filled when the
+      // current value is empty or still the default, to avoid clobbering a name
+      // the user may already have typed.
+      switch (cfg.kind) {
+        case QuickProviderKind.openai:
+          if (cfg.apiKey != null) _openaiKey.text = cfg.apiKey!;
+          if (cfg.baseUrl != null) _openaiBase.text = cfg.baseUrl!;
+          if (cfg.apiPath != null) _openaiPath.text = cfg.apiPath!;
+          if (cfg.name != null &&
+              (_openaiName.text.trim().isEmpty ||
+                  _openaiName.text.trim() == 'OpenAI')) {
+            _openaiName.text = cfg.name!;
+          }
+          break;
+        case QuickProviderKind.google:
+          if (cfg.apiKey != null) _googleKey.text = cfg.apiKey!;
+          if (cfg.baseUrl != null) _googleBase.text = cfg.baseUrl!;
+          if (cfg.location != null) _googleLocation.text = cfg.location!;
+          if (cfg.projectId != null) _googleProject.text = cfg.projectId!;
+          if (cfg.serviceAccountJson != null) {
+            _googleSaJson.text = cfg.serviceAccountJson!;
+          }
+          if (cfg.name != null &&
+              (_googleName.text.trim().isEmpty ||
+                  _googleName.text.trim() == 'Google')) {
+            _googleName.text = cfg.name!;
+          }
+          break;
+        case QuickProviderKind.claude:
+          if (cfg.apiKey != null) _claudeKey.text = cfg.apiKey!;
+          if (cfg.baseUrl != null) _claudeBase.text = cfg.baseUrl!;
+          if (cfg.name != null &&
+              (_claudeName.text.trim().isEmpty ||
+                  _claudeName.text.trim() == 'Claude')) {
+            _claudeName.text = cfg.name!;
+          }
+          break;
+      }
+      setState(() {});
+      showAppSnackBar(
+        context,
+        message: l10n.addProviderSheetQuickAddApplied,
+        type: NotificationType.success,
+      );
+    }
+
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: cs.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (sheetCtx) {
+        // Keep a separate l10n/cs resolved inside the builder so the paste
+        // sheet stays independent of the outer widget's BuildContext.
+        final sheetL10n = AppLocalizations.of(sheetCtx)!;
+        return Padding(
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(sheetCtx).viewInsets.bottom,
+          ),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  sheetL10n.addProviderSheetQuickAddTitle,
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: AppFontWeights.semibold,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: controller,
+                  minLines: 5,
+                  maxLines: 10,
+                  autofocus: true,
+                  decoration: InputDecoration(
+                    hintText: sheetL10n.addProviderSheetQuickAddHint,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    TextButton(
+                      onPressed: () => Navigator.of(sheetCtx).pop(),
+                      child: Text(sheetL10n.addProviderSheetCancelButton),
+                    ),
+                    const SizedBox(width: 8),
+                    FilledButton(
+                      onPressed: () {
+                        final raw = controller.text;
+                        final error = quickParseError(raw);
+                        if (error != null) {
+                          showAppSnackBar(
+                            sheetCtx,
+                            message: sheetL10n.addProviderSheetQuickAddInvalid(
+                              error,
+                            ),
+                            type: NotificationType.error,
+                          );
+                          return;
+                        }
+                        final cfg = parseQuickProviderConfig(raw);
+                        if (cfg == null) {
+                          showAppSnackBar(
+                            sheetCtx,
+                            message: sheetL10n.addProviderSheetQuickAddInvalid(
+                              '?',
+                            ),
+                            type: NotificationType.error,
+                          );
+                          return;
+                        }
+                        apply(cfg);
+                        Navigator.of(sheetCtx).pop();
+                      },
+                      child: Text(sheetL10n.addProviderSheetConfirmButton),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   Future<void> _onAdd() async {
     final settings = context.read<SettingsProvider>();
     String uniqueKey(String prefix, String display) {
@@ -506,6 +661,18 @@ class _AddProviderSheetState extends State<_AddProviderSheet>
                           color: cs.onSurface,
                           size: 22,
                           onTap: () => Navigator.of(context).maybePop(),
+                        ),
+                      ),
+                    ),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: Padding(
+                        padding: const EdgeInsets.only(right: 8),
+                        child: _TactileIconButton(
+                          icon: Lucide.ClipboardPaste,
+                          color: cs.onSurface,
+                          size: 20,
+                          onTap: _showQuickAdd,
                         ),
                       ),
                     ),
