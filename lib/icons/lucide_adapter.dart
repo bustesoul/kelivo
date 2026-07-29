@@ -17,6 +17,7 @@ class Lucide {
   static const IconData Globe = lucide.LucideIcons.earth;
   static const IconData Earth = lucide.LucideIcons.earth;
   static const IconData Plus = lucide.LucideIcons.plus;
+  static const IconData ClipboardPaste = lucide.LucideIcons.clipboardPaste;
   static const IconData X = lucide.LucideIcons.x;
   static const IconData Ban = lucide.LucideIcons.ban;
   static const IconData Mic = lucide.LucideIcons.mic;
@@ -235,7 +236,6 @@ class Lucide {
   static const IconData Unlink = lucide.LucideIcons.unlink;
   static const IconData FolderInput = lucide.LucideIcons.folderInput;
   static const IconData FolderOutput = lucide.LucideIcons.folderOutput;
-  static const IconData ClipboardPaste = lucide.LucideIcons.clipboardPaste;
   static const IconData FileUp = lucide.LucideIcons.fileUp;
   static const IconData AArrowUp = lucide.LucideIcons.aArrowUp;
   static const IconData AArrowDown = lucide.LucideIcons.aArrowDown;
